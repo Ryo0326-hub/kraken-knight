@@ -88,7 +88,7 @@ feature ablation, and paired block-bootstrap uncertainty. A finding of no
 incremental value is a valid result. See
 [`docs/RESEARCH_PROTOCOL.md`](docs/RESEARCH_PROTOCOL.md).
 
-## Planned system boundaries
+## System boundaries
 
 - Kraken is authoritative for instruments, market data, fees, balances, orders,
   executions, and account history.
@@ -104,34 +104,95 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for components and invariants
 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for release and old-bot cutover gates,
 and [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for operator procedures.
 
-## Checkpoint 1: local-only core
+## Checkpoint 2: authenticated read-only reconciliation
 
-The current implementation cannot access authenticated Kraken endpoints or
-submit an order. It includes a read-only public Kraken OHLC adapter that
-quarantines the mutable final candle, the frozen strategy calculation, causal
-market-data validation, an initial event backtester, provenance hashing, a
-secret-redacting/fail-closed configuration layer, an append-only SQLite decision
-and intent ledger, and unit tests.
+The current implementation adds an authenticated Kraken read path to the
+Checkpoint 1 research core. It reads a closed allowlist of instrument, fee,
+balance, order, trade, ledger, and API-key metadata endpoints; validates and
+redacts their responses; and produces a deterministic account reconciliation.
+Private requests use Kraken signing, serialized monotonic nonces, bounded
+responses, and a conservative per-run request-cost budget. There is no arbitrary
+private-method escape hatch.
+
+Reconciliation classifies an observation as `CLEAN`, `UNRESOLVED`, or
+`DISARMED`, records `exchange_writes: false`, and can append a content-addressed
+snapshot to the immutable SQLite schema v3 ledger. Legacy hints are claims to
+match against Kraken history, never a substitute for exchange facts. A `CLEAN`
+cutover requires exactly five reviewed hints with five unique Kraken order IDs
+and an operator-pinned manifest digest.
 
 With Python 3.12 and `uv` installed, use a non-editable install so the same
 packaged console entry point is exercised locally and in release verification:
 
 ```bash
-uv sync --locked --extra dev --no-editable
+uv sync --locked --extra dev --no-editable --reinstall-package kraken-knight
 .venv/bin/pytest
 .venv/bin/kraken-knight init --json
 .venv/bin/kraken-knight status --json
 .venv/bin/python scripts/run_public_smoke.py
 ```
 
-The CLI defaults to shadow mode and reports `exchange_writes: false`.
-Checkpoint 1 rejects live mode even when credential and environment-arm fields
-are populated; a later checkpoint must implement durable release-bound arming,
-account reconciliation, and the exchange adapter before that boundary can open.
+The CLI defaults to shadow mode and reports `exchange_writes: false`. After the
+operator creates and installs a new read-only Kraken key, bootstrap and perform
+the authenticated checkpoint in this order:
+
+```bash
+.venv/bin/kraken-knight account-id --json
+.venv/bin/kraken-knight legacy-manifest --json \
+  --legacy-hints /restricted/path/hints.json
+# Only after pinning both outputs and completing the quiescence steps below:
+.venv/bin/kraken-knight reconcile --json \
+  --legacy-hints /restricted/path/hints.json
+```
+
+The key must be unique to Kraken Knight, restricted to the production host IP,
+and have exactly `Query Funds`, `Query Open Orders & Trades`, `Query Closed
+Orders & Trades`, and `Query Ledger Entries`. Do not enable trading, cancellation,
+funding, withdrawal, transfer, staking, or Earn permissions, and never copy or
+reuse the legacy bot key. Credentials remain outside Git and command arguments.
+The protected environment must set `KRAKEN_KNIGHT_EXPECTED_KRAKEN_KEY_NAME` and
+`KRAKEN_KNIGHT_EXPECTED_KRAKEN_IP`. Review the `account-id` output and pin its
+`wallet_account_id` as `KRAKEN_KNIGHT_EXPECTED_KRAKEN_ACCOUNT_ID`. Review the
+five-hint file, run `legacy-manifest`, and pin its `legacy_manifest_hash` as
+`KRAKEN_KNIGHT_EXPECTED_LEGACY_MANIFEST_HASH`. Configure
+`KRAKEN_KNIGHT_LEGACY_HINTS_PATH` or supply the same restricted file explicitly.
+The workflow compares these bindings without echoing protected values in status.
+
+Before the first supervised `reconcile`, preserve the legacy evidence, stop and
+disable the legacy writer and every process, timer, cron job, supervisor, or
+container that could restart it, and stop manual Kraken trading. Only then set
+`KRAKEN_KNIGHT_CUTOVER_QUIESCED=true`; it is an operator attestation, not a
+process-control mechanism. Set it back to `false` whenever those conditions no
+longer hold. The supplied reconciliation timer remains disabled.
+
+Leave `KRAKEN_KNIGHT_EXPECTED_FUNDING_MANIFEST_HASH` blank for the first
+supervised reconciliation. Exit code 3 and `UNRESOLVED` are expected. Review the
+persisted `evidence.account_lifetime_ledgers.entries`,
+`evidence.tail_ledgers.entries`, and `evidence.funding_manifest_hash`; pin that
+hash only if every non-trade entry is a recognized positive inbound CAD deposit
+and the collection was quiet. Then rerun with
+`KRAKEN_KNIGHT_EXPECTED_FUNDING_MANIFEST_HASH` set. Any unknown asset, direction,
+or ledger type remains a hard stop; the hash does not turn an unexplained entry
+into a deposit.
+
+This checkpoint deliberately does not paginate history. It reads one
+account-lifetime page and one fenced-tail page from each endpoint, with a maximum
+of 50 `ClosedOrders`, 50 `Ledgers`, and 100 `TradesHistory` records per page. If
+Kraken reports more records than a page can hold, completeness fails and the run
+cannot be `CLEAN`. This one-page ceiling is an explicit Checkpoint 2 limitation,
+not a claim that all account history was fetched.
+
+Checkpoint 2 still rejects live mode even when credential and environment-arm
+fields are populated. The adapter has no submit, edit, or cancel method, the
+provided reconciliation timer is not enabled, and neither the droplet nor the
+legacy service has been changed by this repository checkpoint. A real account
+reconciliation remains pending until the operator creates the new key and
+performs the supervised procedure. Deployment, durable arming, execution,
+Telegram alerts, and Blockchair ingestion remain later gated checkpoints.
+
 The public smoke command prints an explicitly labeled engineering report; its
-short rolling window is not the research-grade profitability backtest. Kraken
-authentication, reconciliation, execution, Telegram alerts, production systemd
-installation, and Blockchair ingestion remain later gated checkpoints.
+short rolling window is not the research-grade profitability backtest. A clean
+reconciliation proves account-state observability, not positive expected P&L.
 
 Because this checkpoint has daily OHLC rather than post-decision intraday trades,
 its replay waits until the following UTC day's open. That is a conservative
@@ -161,10 +222,10 @@ them.
 ## Repository and secret hygiene
 
 No API key, private key, Telegram token, chat identifier, raw secret-bearing
-response, production database, or `.env` file belongs in Git. Kraken credentials
-must be IP-allowlisted and must not have withdrawal, deposit, transfer, or Earn
-permissions. The old and new bots must never share an API key or concurrently
-write to the account.
+response, production database, or `.env` file belongs in Git. The Checkpoint 2
+Kraken key must be IP-allowlisted and limited to the four read permissions listed
+above. The old and new bots must never share an API key or concurrently write to
+the account.
 
 Until the later checkpoints pass, this repository is not a deployable or live
 trading system.

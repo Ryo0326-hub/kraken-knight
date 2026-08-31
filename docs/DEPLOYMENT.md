@@ -7,9 +7,14 @@ Ubuntu droplet and the replacement of the existing ML bot. It is not permission
 to deploy from an unreviewed working tree or to send a live trade before the
 release gates pass.
 
-The initial host audit found Python 3.12, systemd, approximately 1 GB RAM, no
-Docker runtime, and an enabled legacy service named `alpha-seek.service`. Those
-facts are point-in-time observations and MUST be rechecked at cutover.
+Checkpoint 2 stops before deployment. It provides authenticated read-only
+reconciliation code and inactive systemd templates, but no credential has been
+created or installed, no real Kraken reconciliation has been recorded, and no
+host service or legacy process has been changed. The procedures below remain
+operator-controlled release gates, not a report that cutover occurred.
+
+Host-specific audit facts, paths, service names, and process evidence belong in
+the restricted cutover record and MUST be rechecked at cutover.
 
 The public repository MUST NOT contain the droplet address, SSH details,
 credentials, production database, private logs, or operator chat identifiers.
@@ -35,13 +40,13 @@ configuration are not writable by that account; only the state/artifact
 directories are. Secret files are mode `0600` or an equivalent systemd
 credential mechanism. journald receives structured, redacted logs.
 
-Planned systemd units:
+Systemd unit templates:
 
 - `kraken-knight.service` — finite daily decision and bounded execution;
 - `kraken-knight.timer` — schedules 00:15 UTC with persistence disabled
   for missed live decisions unless replay safety explicitly handles the date;
 - `kraken-knight-reconcile.service` / `.timer` — read/reconcile health and
-  unresolved orders at a conservative interval; and
+  unresolved orders every 30 minutes with no exchange-write capability; and
 - an optional research collection unit with lower priority and no trading
   credential access.
 
@@ -49,6 +54,11 @@ Systemd should set a restrictive umask, read-only system paths, private temporar
 storage, no-new-privileges, bounded memory/CPU, restart limits, and explicit
 writable paths. The reconciliation process and daily process still obey the
 application-level database lease; systemd alone is not the single-writer proof.
+The Checkpoint 2 reconcile unit and timer are tracked for review but MUST NOT be
+installed, enabled, or started during account bootstrap or the supervised
+cutover reconciliation. They remain inactive until the legacy writer is disabled,
+manual trading is frozen, the pinned rerun is `CLEAN`, and a later deployment
+checkpoint explicitly authorizes scheduling.
 
 Host time synchronization, disk capacity, SQLite integrity, DNS/TLS, memory
 headroom, and log rotation are preflight checks. Resource-intensive backtests run
@@ -66,16 +76,32 @@ includes, at minimum:
 - account/sleeve and release-cap settings; and
 - database/state paths.
 
-The exact variable names belong in the role-specific tracked environment
-examples without values once each configuration implementation exists.
-Production values never enter the Git
-working tree, shell history, command arguments, unit file, CI logs, or alerts.
+Production values never enter the Git working tree, shell history, command
+arguments, unit file, CI logs, or alerts. Checkpoint 2's protected configuration
+binds the exact key name and allowlisted host IP with
+`KRAKEN_KNIGHT_EXPECTED_KRAKEN_KEY_NAME` and
+`KRAKEN_KNIGHT_EXPECTED_KRAKEN_IP`; the public wallet ID with
+`KRAKEN_KNIGHT_EXPECTED_KRAKEN_ACCOUNT_ID`; the reviewed five-claim digest with
+`KRAKEN_KNIGHT_EXPECTED_LEGACY_MANIFEST_HASH`; and the reviewed non-trade ledger
+digest with `KRAKEN_KNIGHT_EXPECTED_FUNDING_MANIFEST_HASH`.
+`KRAKEN_KNIGHT_LEGACY_HINTS_PATH` points to the restricted evidence file.
+`KRAKEN_KNIGHT_CUTOVER_QUIESCED` is false by default and may be true only after
+the old writer, its restart paths, and manual trading are stopped. Status output
+exposes only safe configured/attested booleans for these bindings.
 
-The new Kraken key is unique to Kraken Knight, restricted to the production IP
-where supported, and permits only the minimum balance/history/order/WebSocket
-and Spot trading operations. Withdrawal, deposit, transfer, staking, and Earn
-permissions are prohibited. Private requests are serialized as needed to
-preserve nonce order.
+The Checkpoint 2 Kraken key is newly created for Kraken Knight, restricted to the
+production host IP, and has exactly these permissions:
+
+- `Query Funds`;
+- `Query Open Orders & Trades`;
+- `Query Closed Orders & Trades`; and
+- `Query Ledger Entries`.
+
+Do not enable order creation, order modification, cancellation, funding,
+withdrawal, deposit, transfer, staking, Earn, or any other permission. Never copy
+or reuse the legacy bot key. Private requests are serialized as needed to
+preserve nonce order. Kraken API-key metadata is validated in memory; its API-key
+identifier is not stored in a report, ledger row, log, or alert.
 
 Blockchair URLs are sanitized before logging because the API key may be supplied
 as a query parameter. The production V1 service should not receive the
@@ -92,7 +118,7 @@ Only an identified Git commit that passed CI may be deployed. A release records:
 - commit SHA and assertion that the source tree was clean;
 - locked dependency hash and Python version;
 - test/CI run identifiers;
-- database schema version;
+- database schema version (Checkpoint 2 is schema v3);
 - redacted configuration hash;
 - built artifact checksum; and
 - operator, deployment time, previous release, and rollback path.
@@ -121,17 +147,41 @@ The release must pass:
 - Blockchair/V1 separation and schema-contract tests; and
 - redaction tests for secrets, signed requests, and query-string keys.
 
+Checkpoint 2 additionally requires fixed-fixture proof of Kraken request
+signing, strictly increasing serialized nonces, the closed read-endpoint
+allowlist, strict response parsing, single-page completeness/request-cost
+ceilings, API-key permission and IP-allowlist gates, deterministic legacy-hint
+matching, immutable schema-v3 reconciliation snapshots, and
+`exchange_writes: false` through every success and failure path.
+
 The full backtest report must exist before a live operational probe. Profit may
 be negative, but the run cannot contain causal leakage, accounting mismatch,
 pathological defect-driven turnover, risk violations, or unresolved errors.
 
+The first credentialed bootstrap is manual and supervised. From an immutable
+reviewed release, with the protected environment loaded, the operator runs:
+
+```bash
+kraken-knight init --json
+kraken-knight account-id --json
+kraken-knight legacy-manifest --json \
+  --legacy-hints /restricted/path/hints.json
+```
+
+The operator independently reviews and pins the returned `wallet_account_id` as
+`KRAKEN_KNIGHT_EXPECTED_KRAKEN_ACCOUNT_ID`, and pins the reviewed
+`legacy_manifest_hash` as `KRAKEN_KNIGHT_EXPECTED_LEGACY_MANIFEST_HASH`. The
+restricted file must contain all five uncertain submissions with five unique
+Kraken order IDs. Leave `KRAKEN_KNIGHT_EXPECTED_FUNDING_MANIFEST_HASH` blank and
+`KRAKEN_KNIGHT_CUTOVER_QUIESCED=false` at this stage. Do not run the supervised
+reconciliation until the writer and manual-trading freeze in section 6.2 is
+complete.
+
 ## 6. Legacy bot evidence and cutover
 
-The initial read-only audit found the legacy project under
-`/home/ryo/mlbot/mlbot_tutorial`, controlled by `alpha-seek.service`, with live
-trading enabled. Its local records included five submissions described as
-`submitted_not_fill_confirmed`. That label is not evidence of either fills or
-non-fills; Kraken account history is authoritative.
+The restricted initial audit found five legacy submissions whose local state did
+not prove either fills or non-fills. Host paths and service names are deliberately
+excluded from this public repository; Kraken account history is authoritative.
 
 Cutover is a maintenance event with a single-writer invariant:
 
@@ -144,28 +194,49 @@ Cutover is a maintenance event with a single-writer invariant:
 3. Record archive checksum, owner, permissions, and a successful test listing or
    restore. Do not delete or clean the original during initial preservation.
 
-### 6.2 Reconcile the exchange
+### 6.2 Quiesce the old writer and manual account activity
 
-1. Query Kraken directly for BTC/CAD balances, held amounts, all open orders,
-   recent closed/canceled orders, executions, and fees.
-2. Match each of the five uncertain submissions and every other legacy record to
-   Kraken identifiers, time, side, price, quantity, and fill status.
-3. Classify residual BTC/CAD as confirmed legacy fills, explicit external
-   inventory/cash flow, or unresolved discrepancy.
-4. Stop if any order, fill, balance, or liability remains unexplained.
-
-### 6.3 Stop the old writer
-
-1. Stop and disable `alpha-seek.service`.
+1. Stop and disable the legacy writer identified in the restricted cutover record.
 2. Confirm the service is inactive and no legacy process, cron job, timer,
    supervisor, shell, or container can restart it.
-3. Cancel only orders proven to belong to the legacy bot. If ownership is
-   uncertain, pause for operator review rather than using an indiscriminate
-   cancel-all action.
-4. Re-query Kraken until the final open-order set and balances match the signed
-   cutover record.
-5. Revoke the legacy Kraken key. It is never shared with or reused by Kraken
-   Knight.
+3. Declare a manual-trading freeze. Do not place an order through Kraken Pro,
+   another client, another API key, or an automation during reconciliation.
+4. Revoke the legacy Kraken key after the writer has stopped. It is never shared
+   with or reused by Kraken Knight.
+5. Only now set `KRAKEN_KNIGHT_CUTOVER_QUIESCED=true`. This setting attests to
+   verified external conditions; it does not stop a process or prevent a manual
+   order. Set it back to `false` if the maintenance freeze ends.
+
+### 6.3 Reconcile the exchange and pin funding evidence
+
+1. Leave `KRAKEN_KNIGHT_EXPECTED_FUNDING_MANIFEST_HASH` blank and run
+   `kraken-knight reconcile --json --legacy-hints /restricted/path/hints.json`
+   with the fresh read-only key. Barring a stronger failed gate, this first run
+   intentionally returns `UNRESOLVED`, exits 3, and persists its evidence.
+2. Inspect balances, held amounts, open orders, the five queried legacy order
+   IDs, and the bounded closed-order, trade, ledger, liability, and fee evidence.
+   The implementation does not paginate: each account-lifetime page and each
+   fenced-tail page is capped at 50 `ClosedOrders`, 50 `Ledgers`, and 100
+   `TradesHistory` records. If Kraken reports a higher count, the run cannot be
+   `CLEAN`; do not describe the evidence as complete account history.
+3. Match each of the five uncertain submissions and every other legacy record to
+   Kraken identifiers, time, side, price, quantity, and fill status. The pinned
+   hint file supplies claims to check and never proves them by itself.
+4. Review every item in `evidence.account_lifetime_ledgers.entries` and
+   `evidence.tail_ledgers.entries`, require a quiet collection, and review the
+   returned `evidence.funding_manifest_hash`. Pin that hash as
+   `KRAKEN_KNIGHT_EXPECTED_FUNDING_MANIFEST_HASH` only when every non-trade
+   ledger item is a recognized positive inbound CAD deposit with a nonnegative
+   fee. A withdrawal, transfer, non-CAD asset, nonpositive amount, or unknown
+   type remains unexplained and must not be blessed by copying the hash.
+5. Rerun the same reconciliation with the reviewed funding digest configured and
+   the account still quiescent. Cancel only open orders proven to belong to the
+   legacy bot, using a separately authorized operator path; Checkpoint 2 has no
+   cancel command. If ownership is uncertain, stop instead of using cancel-all.
+   After any cancellation, rerun from a quiet account snapshot.
+6. Stop if the final status is `UNRESOLVED` or `DISARMED`, or if any order, fill,
+   balance, liability, or cash flow remains unexplained. A successful process exit
+   and `CLEAN` are necessary evidence, not authorization to trade or deploy.
 
 ### 6.4 Establish the opening ledger
 
@@ -177,6 +248,8 @@ inventory after arming.
 
 Only after these steps may the new read-only/shadow services start. There is no
 interval in which both bots hold live write authority.
+
+Checkpoint 2 has not performed any of these host or account actions.
 
 ## 7. Staged rollout
 

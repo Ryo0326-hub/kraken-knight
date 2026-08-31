@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import hmac
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
+from ipaddress import ip_address
 from pathlib import Path
 
 from kraken_knight.provenance import sha256_json
@@ -26,7 +28,7 @@ class ConfigError(ValueError):
 
 
 class RunMode(StrEnum):
-    """Recognized broker/runtime modes; Checkpoint 1 still rejects live."""
+    """Recognized broker/runtime modes; Checkpoint 2 still rejects live."""
 
     BACKTEST = "backtest"
     PAPER = "paper"
@@ -132,7 +134,7 @@ class FrozenRiskSettings:
 class Settings:
     """Validated application settings.
 
-    ``shadow`` is the default even when no environment is present. Checkpoint 1
+    ``shadow`` is the default even when no environment is present. Checkpoint 2
     parses prospective live fields only so every attempted live configuration
     fails with a specific reason; it rejects live even when they are populated.
     A later durable arm must not treat two values in one environment file as
@@ -149,6 +151,13 @@ class Settings:
     live_trading_confirmation: str = field(default="", repr=False)
     kraken_api_key: SecretValue | None = field(default=None, repr=False)
     kraken_api_secret: SecretValue | None = field(default=None, repr=False)
+    expected_kraken_key_name: str | None = field(default=None, repr=False)
+    expected_kraken_ip: str | None = field(default=None, repr=False)
+    expected_kraken_account_id: str | None = field(default=None, repr=False)
+    expected_legacy_manifest_hash: str | None = field(default=None, repr=False)
+    expected_funding_manifest_hash: str | None = field(default=None, repr=False)
+    cutover_quiesced: bool = False
+    legacy_hints_path: Path | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.mode, RunMode):
@@ -159,7 +168,7 @@ class Settings:
             raise ConfigError("account_id cannot be empty")
         if self.account_id != "dedicated-btc-cad":
             raise ConfigError(
-                "Checkpoint 1 freezes account_id; authenticated account binding is not implemented"
+                "Checkpoint 2 freezes account_id; changing the account binding requires review"
             )
         if self.pair != "BTC/CAD":
             raise ConfigError("btc_cad_daily_momentum_v1 is frozen to BTC/CAD")
@@ -170,6 +179,60 @@ class Settings:
             self.live_trading_confirmation,
             LIVE_CONFIRMATION,
         )
+        if (self.kraken_api_key is None) != (self.kraken_api_secret is None):
+            raise ConfigError(
+                "Kraken authenticated reads require both KRAKEN_API_KEY and KRAKEN_API_SECRET"
+            )
+        if self.expected_kraken_key_name is not None:
+            normalized_name = self.expected_kraken_key_name.strip()
+            if not normalized_name:
+                raise ConfigError("EXPECTED_KRAKEN_KEY_NAME cannot be blank")
+            object.__setattr__(self, "expected_kraken_key_name", normalized_name)
+        if self.expected_kraken_ip is not None:
+            try:
+                normalized_ip = str(ip_address(self.expected_kraken_ip.strip()))
+            except ValueError:
+                raise ConfigError("EXPECTED_KRAKEN_IP must be one IPv4 or IPv6 address") from None
+            object.__setattr__(self, "expected_kraken_ip", normalized_ip)
+        if self.expected_kraken_account_id is not None:
+            normalized_account_id = self.expected_kraken_account_id.strip().upper()
+            if re.fullmatch(r"[A-Z0-9]{4}(?:-[A-Z0-9]{4}){3}", normalized_account_id) is None:
+                raise ConfigError(
+                    "EXPECTED_KRAKEN_ACCOUNT_ID must use Kraken's public wallet-account format"
+                )
+            object.__setattr__(self, "expected_kraken_account_id", normalized_account_id)
+        if self.expected_legacy_manifest_hash is not None:
+            normalized_manifest_hash = self.expected_legacy_manifest_hash.strip().lower()
+            if len(normalized_manifest_hash) != 64 or any(
+                character not in "0123456789abcdef" for character in normalized_manifest_hash
+            ):
+                raise ConfigError("EXPECTED_LEGACY_MANIFEST_HASH must be a SHA-256 digest")
+            object.__setattr__(
+                self,
+                "expected_legacy_manifest_hash",
+                normalized_manifest_hash,
+            )
+        if self.expected_funding_manifest_hash is not None:
+            normalized_funding_hash = self.expected_funding_manifest_hash.strip().lower()
+            if len(normalized_funding_hash) != 64 or any(
+                character not in "0123456789abcdef" for character in normalized_funding_hash
+            ):
+                raise ConfigError("EXPECTED_FUNDING_MANIFEST_HASH must be a SHA-256 digest")
+            object.__setattr__(
+                self,
+                "expected_funding_manifest_hash",
+                normalized_funding_hash,
+            )
+        if not isinstance(self.cutover_quiesced, bool):
+            raise ConfigError("cutover_quiesced must be a bool")
+        if self.legacy_hints_path is not None and not isinstance(self.legacy_hints_path, Path):
+            raise ConfigError("legacy_hints_path must be a pathlib.Path")
+        if self.kraken_api_key is None and (
+            self.expected_kraken_key_name is not None
+            or self.expected_kraken_ip is not None
+            or self.expected_kraken_account_id is not None
+        ):
+            raise ConfigError("Kraken account-binding fields require authenticated credentials")
         if self.mode is RunMode.LIVE:
             if not self.live_trading_enabled or not confirmation_matches:
                 raise ConfigError(
@@ -179,8 +242,8 @@ class Settings:
             if self.kraken_api_key is None or self.kraken_api_secret is None:
                 raise ConfigError("live mode requires Kraken trading credentials")
             raise ConfigError(
-                "live mode is unavailable in Checkpoint 1; a durable release-bound arm, "
-                "account reconciliation, and exchange adapter are not implemented"
+                "live mode is unavailable in Checkpoint 2; authenticated access is read-only "
+                "and no exchange-write adapter is implemented"
             )
         elif self.live_trading_enabled or self.live_trading_confirmation:
             raise ConfigError("live arming fields may only be set when MODE=live")
@@ -220,6 +283,24 @@ class Settings:
             ),
             kraken_api_key=_optional_secret(values.get(f"{ENV_PREFIX}KRAKEN_API_KEY")),
             kraken_api_secret=_optional_secret(values.get(f"{ENV_PREFIX}KRAKEN_API_SECRET")),
+            expected_kraken_key_name=_optional_text(
+                values.get(f"{ENV_PREFIX}EXPECTED_KRAKEN_KEY_NAME")
+            ),
+            expected_kraken_ip=_optional_text(values.get(f"{ENV_PREFIX}EXPECTED_KRAKEN_IP")),
+            expected_kraken_account_id=_optional_text(
+                values.get(f"{ENV_PREFIX}EXPECTED_KRAKEN_ACCOUNT_ID")
+            ),
+            expected_legacy_manifest_hash=_optional_text(
+                values.get(f"{ENV_PREFIX}EXPECTED_LEGACY_MANIFEST_HASH")
+            ),
+            expected_funding_manifest_hash=_optional_text(
+                values.get(f"{ENV_PREFIX}EXPECTED_FUNDING_MANIFEST_HASH")
+            ),
+            cutover_quiesced=_parse_bool(
+                values.get(f"{ENV_PREFIX}CUTOVER_QUIESCED", "false"),
+                field_name="CUTOVER_QUIESCED",
+            ),
+            legacy_hints_path=_optional_path(values.get(f"{ENV_PREFIX}LEGACY_HINTS_PATH")),
         )
 
     @property
@@ -242,8 +323,19 @@ class Settings:
             "kraken_credentials_configured": (
                 self.kraken_api_key is not None and self.kraken_api_secret is not None
             ),
+            "kraken_read_binding_configured": (
+                self.kraken_api_key is not None
+                and self.kraken_api_secret is not None
+                and self.expected_kraken_key_name is not None
+                and self.expected_kraken_ip is not None
+                and self.expected_kraken_account_id is not None
+            ),
+            "cutover_quiesced": self.cutover_quiesced,
+            "legacy_manifest_pinned": self.expected_legacy_manifest_hash is not None,
+            "funding_manifest_pinned": self.expected_funding_manifest_hash is not None,
             "ledger_path": str(self.ledger_path),
             "live_armed": self.live_armed,
+            "legacy_hints_configured": self.legacy_hints_path is not None,
             "mode": self.mode.value,
             "pair": self.pair,
             "risk_fingerprint": self.risk.fingerprint,
@@ -293,3 +385,15 @@ def _optional_secret(raw_value: str | None) -> SecretValue | None:
     if raw_value is None or not raw_value.strip():
         return None
     return SecretValue(raw_value.strip())
+
+
+def _optional_text(raw_value: str | None) -> str | None:
+    if raw_value is None or not raw_value.strip():
+        return None
+    return raw_value.strip()
+
+
+def _optional_path(raw_value: str | None) -> Path | None:
+    if raw_value is None or not raw_value.strip():
+        return None
+    return Path(raw_value.strip()).expanduser()

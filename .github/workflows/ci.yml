@@ -33,7 +33,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install project and development tools
-        run: uv sync --locked --extra dev --no-editable
+        run: uv sync --locked --extra dev --no-editable --reinstall-package kraken-knight
 
       - name: Check formatting
         run: .venv/bin/ruff format --check .
@@ -65,4 +65,8 @@ jobs:
           sudo install -d /opt/kraken-knight/current/.venv/bin /etc/kraken-knight
           sudo ln -sf /usr/bin/true /opt/kraken-knight/current/.venv/bin/kraken-knight
           sudo install -m 0640 /dev/null /etc/kraken-knight/config.env
-          systemd-analyze verify deploy/systemd/kraken-knight.service deploy/systemd/kraken-knight.timer
+          systemd-analyze verify \
+            deploy/systemd/kraken-knight.service \
+            deploy/systemd/kraken-knight.timer \
+            deploy/systemd/kraken-knight-reconcile.service \
+            deploy/systemd/kraken-knight-reconcile.timer

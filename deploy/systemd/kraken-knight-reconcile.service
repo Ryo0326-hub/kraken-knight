@@ -1,6 +1,6 @@
 [Unit]
-Description=Kraken Knight daily BTC/CAD decision job
-Documentation=https://github.com/Ryo0326-hub/kraken-knight
+Description=Kraken Knight authenticated read-only reconciliation
+Documentation=https://github.com/Ryo0326-hub/kraken-knight/blob/main/docs/RUNBOOK.md
 Wants=network-online.target
 After=network-online.target
 ConditionPathIsDirectory=/opt/kraken-knight/current
@@ -14,10 +14,13 @@ EnvironmentFile=/etc/kraken-knight/config.env
 Environment=PYTHONUNBUFFERED=1
 UMask=0077
 
-# Checkpoint 2 keeps the daily strategy job local-only. Authenticated reads run
-# only through the separate reconciliation unit; this unit cannot trade.
-ExecStart=/opt/kraken-knight/current/.venv/bin/kraken-knight init
-ExecStart=/opt/kraken-knight/current/.venv/bin/kraken-knight status
+# Checkpoint 2 may read Kraken and append a sanitized local snapshot. The CLI
+# has no exchange-write command. Keep this unit disabled until the dedicated
+# read-only key and all pinned bindings are reviewed, the legacy/manual account
+# freeze is verified, a supervised rerun is CLEAN, and later installation is
+# explicitly authorized under the runbook.
+ExecStart=/opt/kraken-knight/current/.venv/bin/kraken-knight init --json
+ExecStart=/opt/kraken-knight/current/.venv/bin/kraken-knight reconcile
 
 StateDirectory=kraken-knight
 StateDirectoryMode=0700
@@ -53,7 +56,4 @@ SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 TasksMax=64
 MemoryMax=512M
-TimeoutStartSec=5min
-
-[Install]
-WantedBy=multi-user.target
+TimeoutStartSec=10min

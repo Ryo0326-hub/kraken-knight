@@ -46,7 +46,7 @@ Transport = Callable[[str, float], bytes]
 
 
 def _default_transport(url: str, timeout_seconds: float) -> bytes:
-    request = Request(url, headers={"User-Agent": "kraken-knight/0.1"})
+    request = Request(url, headers={"User-Agent": "kraken-knight/0.2"})
     try:
         with urlopen(request, timeout=timeout_seconds) as response:
             return cast(bytes, response.read())

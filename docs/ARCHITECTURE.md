@@ -48,7 +48,41 @@ validation. Blockchair is authoritative only for its raw observed payload; the
 application assigns causal availability and never treats a derived label as an
 exchange fact.
 
-## 3. Planned package boundaries
+### Checkpoint 2 boundary
+
+The implemented exchange boundary is authenticated but read-only. A closed
+Kraken endpoint allowlist supplies server time, BTC/CAD instrument rules, the
+authenticated fee tier, balances and holds, open and closed orders, trades,
+ledger entries, and sanitized API-key metadata. The adapter owns request
+signing, serialized monotonic nonces, response-size/time bounds, strict parsing,
+error classification, and a conservative per-workflow request-cost budget.
+History collection is deliberately single-page rather than paginated: it reads
+one account-lifetime page and one fenced-tail page per endpoint, capped at 50
+`ClosedOrders`, 50 `Ledgers`, and 100 `TradesHistory` records per page. A reported
+count beyond any page capacity fails completeness, so the workflow cannot call a
+larger account history `CLEAN`.
+
+The reconciliation core is exchange-independent. It canonicalizes observed
+facts and legacy hints, applies deterministic completeness and safety gates, and
+emits `CLEAN`, `UNRESOLVED`, or `DISARMED` with a source hash and
+`exchange_writes: false`. A `CLEAN` cutover requires a wallet ID discovered and
+pinned through `KRAKEN_KNIGHT_EXPECTED_KRAKEN_ACCOUNT_ID`, five unique Kraken
+order IDs whose reviewed digest equals
+`KRAKEN_KNIGHT_EXPECTED_LEGACY_MANIFEST_HASH`, an exact reviewed non-trade
+ledger digest equal to `KRAKEN_KNIGHT_EXPECTED_FUNDING_MANIFEST_HASH`, and the
+operator's `KRAKEN_KNIGHT_CUTOVER_QUIESCED` attestation. The first
+funding-manifest run is intentionally `UNRESOLVED`: it persists the observed
+digest for entry-by-entry review and a pinned rerun. Its persistence boundary
+accepts only sanitized, content-addressed reports. The API key returned in
+Kraken key metadata, private signatures, nonces, and raw credential-bearing
+responses are never persisted.
+
+No Checkpoint 2 object can submit, edit, or cancel an order. `live` mode remains
+rejected at configuration validation, and no broker write port is wired into the
+CLI. The order path in the context diagram is the reviewed target architecture,
+not current capability.
+
+## 3. Package boundaries
 
 The implementation should preserve these responsibilities even if exact module
 names evolve:
@@ -57,7 +91,8 @@ names evolve:
 | --- | --- | --- |
 | `config` | Typed environment/file configuration, mode, immutable config hash | Read secrets into logs or choose strategy parameters dynamically |
 | `domain` | Money, quantity, candle, signal, target, intent, order, fill, and reason types | Perform network or database I/O |
-| `data.kraken` | OHLC history, book, instrument rules, server time, validation | Decide target exposure |
+| `kraken_read` / `market` | Allowlisted account reads, OHLC history, instrument rules, server time, validation | Accept an arbitrary private method or write to Kraken |
+| `reconciliation` | Normalize exchange facts, match legacy hints, classify safety | Treat a hint or missing page as exchange truth |
 | `data.blockchair` | Raw archival, metadata, confirmation and availability rules | Feed V1 live decisions |
 | `strategy` | Frozen indicators and raw target calculation | Submit orders or relax risk gates |
 | `risk` | Capital constraints, circuit breakers, target reduction, armed state | Increase a strategy target |
@@ -97,11 +132,19 @@ to recompute and submit a new one.
 
 ### 4.2 Reconciliation/health job
 
-A lightweight periodic job observes live balances, orders, executions, dead-man
-switch state, service health, clock skew, database health, and alert delivery.
-It can cancel or disarm according to policy but cannot create a new strategy
-target. Its frequency must respect Kraken rate limits and is independent of the
-daily candle schedule.
+A lightweight periodic job observes live balances, orders, executions, account
+ledger history, fee tier, key permissions, clock skew, and database health. At
+Checkpoint 2 it can only classify and persist a reconciliation; `DISARMED` is a
+report outcome, not an exchange action. It cannot cancel, submit, edit, create a
+strategy target, or arm trading. Its conservative 30-minute timer template is
+provided for later operator installation but is not enabled or deployed by this
+checkpoint.
+
+`CUTOVER_QUIESCED` is not process control. The operator may assert it only after
+the legacy writer and all restart paths are disabled and manual trading is
+stopped for the supervised run. Systemd does not set it automatically, and the
+inactive timer must not turn a maintenance-window attestation into a standing
+claim.
 
 ### 4.3 Research collection and build jobs
 
@@ -144,6 +187,9 @@ The logical records include:
 - `source_snapshots`: source, observation time, covered interval, raw hash,
   schema/contract version and hash, storage URI, request cost, quota state, and
   validation outcome;
+- `reconciliation_snapshots`: immutable observation identity, account-binding
+  and source hashes, status, sanitized canonical report, and an enforced
+  zero-exchange-write flag;
 - `decisions`: deterministic ID, strategy date/version, config/code/data hashes,
   features, equity, pre/post-risk targets, reason, and mode;
 - `risk_events`: equity observations, cash flows, high-water state, gates,
@@ -158,6 +204,11 @@ The logical records include:
 - `alerts`: event, redacted payload hash, channel, attempts, and delivery result;
 - `cash_flows`: explicit deposits/withdrawals excluded from strategy P&L; and
 - `leases` / `schema_migrations`: concurrency and database-version evidence.
+
+Checkpoint 2 uses schema version 3. Initialization performs a verified v2-to-v3
+migration before accepting reconciliation snapshots; unsupported or structurally
+incompatible databases fail closed. A duplicate account/observation instant is
+accepted only when its deterministic content is identical.
 
 Exchange IDs and trade IDs require unique constraints. A decision has at most
 one economic intent. A client order ID is unique across all attempts. Retried
@@ -252,10 +303,16 @@ dedicated writable state directory, restrictive systemd protections, and
 credentials provided outside the repository. Backups are encrypted or kept on a
 restricted host and are restore-tested.
 
-Network/API response parsing uses explicit schemas, bounds, timeouts, bounded
-retries with jitter, and rate-limit awareness. A malformed response cannot
-default to a buy. Kraken private calls are serialized where required to preserve
-nonce ordering. Blockchair request points are recorded locally, requests are
+The Checkpoint 2 Kraken key is newly created for this service, IP-allowlisted,
+and has exactly `Query Funds`, `Query Open Orders & Trades`, `Query Closed Orders
+& Trades`, and `Query Ledger Entries`. It never reuses the legacy key and has no
+trade, cancel, funding, withdrawal, transfer, staking, or Earn permission.
+
+Network/API response parsing uses explicit schemas, bounds, timeouts, and
+rate-limit awareness. Checkpoint 2 performs no automatic Kraken retry: a failed
+read consumes its nonce and the workflow fails closed. A malformed response
+cannot default to a buy. Kraken private calls are serialized to preserve nonce
+ordering. Blockchair request points are recorded locally, requests are
 serialized within the research budget, and quota or compatibility failure stops
 research collection without affecting V1. The client never retries without its
 configured key or logs the secret-bearing request URL.
@@ -270,6 +327,13 @@ Before live canary, automated or recorded tests must prove:
 
 - identical inputs produce an identical decision and data/config hash;
 - a repeated job creates no duplicate intent or order;
+- the authenticated adapter exposes only the reviewed read endpoint set and its
+  request objects are always public GETs or signed read-only POSTs;
+- broad key permissions, a missing IP allowlist, history exceeding a one-page
+  endpoint bound, malformed Kraken data, or unresolved legacy claims cannot
+  produce `CLEAN`;
+- reconciliation snapshots are deterministic, immutable, secret-free, and
+  enforce `exchange_writes: false` at application and schema boundaries;
 - termination at every execution-state transition recovers correctly;
 - a submission timeout is reconciled without blind retry;
 - partial fill plus restart produces only the correct remainder;

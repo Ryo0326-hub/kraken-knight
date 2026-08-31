@@ -1,0 +1,14 @@
+[Unit]
+Description=Run Kraken Knight read-only reconciliation every 30 minutes
+Documentation=https://github.com/Ryo0326-hub/kraken-knight/blob/main/docs/RUNBOOK.md
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=30min
+AccuracySec=1min
+RandomizedDelaySec=2min
+Persistent=no
+Unit=kraken-knight-reconcile.service
+
+[Install]
+WantedBy=timers.target

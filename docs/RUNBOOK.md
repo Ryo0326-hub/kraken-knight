@@ -11,20 +11,123 @@ Stopping a process does not cancel an exchange order or sell BTC. Canceling an
 order does not sell BTC. The Kraken dead-man switch can affect every account
 order. Never assume one action implies another.
 
-The concrete CLI is not implemented at the documentation checkpoint. Before the
-live canary, it must provide authenticated, audited equivalents of:
+Checkpoint 2 provides these concrete commands:
 
-- `status --json` — mode, arm state, release, risk gates, lease, last jobs;
-- `reconcile --read-only` — compare Kraken with the ledger without writes;
-- `orders` — list intents/attempts and linked Kraken state;
-- `disarm --reason ...` — persist disarm and block new exposure;
-- `cancel-bot-orders --intent ...` — cancel only proven bot-owned orders;
-- `target-cash --reason ...` — invoke bounded risk-exit behavior;
-- `run-daily --mode shadow` — idempotent scheduled/manual replay;
-- `verify-alerts` — exercise redacted Telegram delivery; and
-- `rearm --review ...` — require explicit reviewed evidence.
+- `init --json` — create, verify, or migrate the append-only ledger to schema v3;
+- `status --json` — report redacted configuration and local ledger status; and
+- `account-id --json` — reveal the public wallet ID after the key-name, IP, and
+  read-only permission gates pass;
+- `legacy-manifest --json [--legacy-hints PATH]` — validate exactly five claims
+  with five unique Kraken order IDs and print their normalized digest; and
+- `reconcile --json [--legacy-hints PATH]` — read Kraken, classify the account,
+  and persist a zero-exchange-write reconciliation snapshot.
 
-Examples in this document name operations, not currently runnable commands.
+`--legacy-hints` accepts a restricted operator-owned file of claims to match. It
+does not import those claims as fills or make them exchange truth. The CLI has no
+submit, edit, cancel, arm, disarm, target-cash, or alert-delivery command. Those
+remain future release requirements; later sections name operational actions and
+must not be read as currently runnable CLI commands.
+
+### Checkpoint 2 first authenticated run
+
+This is a supervised maintenance procedure. Do not combine the commands in a
+`set -e` shell script: the intentionally unpinned first funding run returns exit
+code 3 with `UNRESOLVED`.
+
+1. Create a new Kraken key solely for Kraken Knight. Never copy or reuse the
+   legacy bot key.
+2. Restrict it to the production host IP and grant exactly `Query Funds`, `Query
+   Open Orders & Trades`, `Query Closed Orders & Trades`, and `Query Ledger
+   Entries`. Leave every other permission disabled.
+3. Put the key and secret only in the protected environment file; do not pass
+   them as command arguments, paste them into Git, or display them in logs. Set
+   `KRAKEN_KNIGHT_EXPECTED_KRAKEN_KEY_NAME`,
+   `KRAKEN_KNIGHT_EXPECTED_KRAKEN_IP`, and the restricted
+   `KRAKEN_KNIGHT_LEGACY_HINTS_PATH`. Leave
+   `KRAKEN_KNIGHT_CUTOVER_QUIESCED=false` and the account, legacy-manifest, and
+   funding-manifest bindings blank during bootstrap.
+4. From the reviewed release, run `kraken-knight init --json`, followed by
+   `kraken-knight account-id --json`. Independently review the returned public
+   `wallet_account_id`, then pin it as
+   `KRAKEN_KNIGHT_EXPECTED_KRAKEN_ACCOUNT_ID`.
+5. Review the restricted hint file and confirm it contains the five known
+   submissions with five unique, authoritative Kraken order IDs. Run
+   `kraken-knight legacy-manifest --json --legacy-hints /restricted/path/hints.json`
+   and pin the returned `legacy_manifest_hash` as
+   `KRAKEN_KNIGHT_EXPECTED_LEGACY_MANIFEST_HASH`. Do not edit the hint file after
+   pinning; a changed semantic manifest requires a fresh review and digest.
+6. Preserve the legacy evidence. Stop and disable the legacy writer, then verify
+   that no process, service, cron job, timer, supervisor, shell, or container can
+   restart it. Stop all manual Kraken trading for the maintenance window. Only
+   after both conditions are verified may you set
+   `KRAKEN_KNIGHT_CUTOVER_QUIESCED=true`. The setting is an operator attestation;
+   it does not stop either writer. Set it back to `false` if quiescence ends.
+7. Keep `KRAKEN_KNIGHT_EXPECTED_FUNDING_MANIFEST_HASH` blank and run
+   `kraken-knight reconcile --json --legacy-hints /restricted/path/hints.json`.
+   Provided no stronger safety gate fails, this first run is intentionally
+   `UNRESOLVED`, exits 3, and persists its evidence.
+8. Review `evidence.account_lifetime_ledgers.entries` and
+   `evidence.tail_ledgers.entries` entry by entry and compare them with Kraken.
+   Require a quiet collection, then review `evidence.funding_manifest_hash` and
+   pin it only if every non-trade ledger entry is a recognized positive inbound
+   CAD deposit with a nonnegative fee. Any withdrawal, transfer, non-CAD asset,
+   nonpositive amount, or unknown type remains a hard stop; never bless it by
+   copying a hash.
+9. Set the reviewed digest as
+   `KRAKEN_KNIGHT_EXPECTED_FUNDING_MANIFEST_HASH`, then rerun the same
+   `reconcile` command while the account remains quiescent. Inspect status,
+   source hashes, page counts/completeness, balances and holds, liabilities, open
+   and closed orders, trades, fees, identity/permission/IP gates, and every hint.
+   A zero exit and `CLEAN` are necessary but do not authorize trading or deployment.
+10. Treat any final `UNRESOLVED` or `DISARMED` as a hard stop. Preserve the
+    snapshot and do not deploy, enable a timer, or infer a missing fill.
+
+The repository ships an inactive 30-minute reconciliation service/timer
+template. Do not install or enable it during this checkpoint. A real Kraken
+reconciliation remains pending until the entire supervised procedure succeeds.
+
+The legacy-hint file is a JSON array. Checkpoint 2 requires all five known
+uncertain submissions and a unique authoritative Kraken `order_id` for every
+one. Exact quantities and prices are strings and timestamps are UTC:
+
+```json
+[
+  {
+    "hint_id": "legacy-submission-1",
+    "pair": "BTC/CAD",
+    "side": "buy",
+    "quantity_btc": "0.001",
+    "limit_price_cad": "100000.0",
+    "window_start": "2026-01-01T00:00:00Z",
+    "window_end": "2026-01-01T00:10:00Z",
+    "order_id": "KRAKEN-TXID-REQUIRED",
+    "client_order_id": null
+  }
+]
+```
+
+This is a shape example, not real account evidence. Replace every example value,
+keep the file outside the release tree with restrictive permissions, and never
+put an API key, signature, nonce, or secret-bearing URL in it. Missing,
+ambiguous, or conflicting hints cannot prove absence of an exchange order.
+
+Checkpoint 2 does not paginate history. It reads one account-lifetime page and
+one fenced-tail page from each endpoint. Each `ClosedOrders` page is limited to
+50 records, each `Ledgers` page to 50, and each `TradesHistory` page to 100. If
+Kraken's reported count exceeds any page capacity, the completeness gate fails
+and the result cannot be `CLEAN`. Do not describe this as a complete account
+history scan when an account exceeds those bounds.
+
+Checkpoint 2 status semantics are:
+
+| Status | Meaning | Operator treatment |
+| --- | --- | --- |
+| `CLEAN` | The bounded observed read set passed the implemented one-page completeness and safety invariants with no discrepancy | Review and retain the evidence; this still does not authorize a trade or deployment |
+| `UNRESOLVED` | Exchange facts were internally readable, but attribution or opening inventory remains unexplained | Investigate and rerun with better authoritative evidence; do not guess or cut over |
+| `DISARMED` | A safety invariant failed, such as missing/invalid facts, a liability, or an unknown/manual open order | Treat as a hard stop and preserve incident evidence |
+
+No reconciliation status arms trading. `CLEAN` describes only the observation
+and implemented checks at its recorded time.
 
 ## 2. Severity and response targets
 
@@ -39,6 +142,10 @@ Response targets are operational priorities, not promises of resolution. A SEV-1
 is never downgraded merely because market exposure is small.
 
 ## 3. Expected daily heartbeat
+
+This is a later shadow/live acceptance contract. Checkpoint 2 does not schedule
+the daily strategy or deliver Telegram alerts, so this section is not evidence
+that a heartbeat currently exists.
 
 The job runs at 00:15 UTC. By 00:30 UTC, the operator should receive one daily
 heartbeat containing:
@@ -57,6 +164,9 @@ heartbeat containing:
 only when their reasons are present. No message is not a no-trade signal.
 
 ## 4. Daily operator check
+
+This checklist applies after the daily shadow workflow and alert channel are
+implemented and explicitly deployed.
 
 1. Confirm exactly one heartbeat exists for the strategy date.
 2. Confirm its release, mode, arm state, and cap match the approved deployment.
@@ -258,8 +368,8 @@ been recorded.
 
 ## 15. Legacy bot or second writer detected
 
-If `alpha-seek.service`, another private-API process, or unexplained nonce stream
-appears:
+If the legacy service identified in the restricted cutover record, another
+private-API process, or an unexplained nonce stream appears:
 
 1. Treat it as SEV-1 and disarm Kraken Knight.
 2. Stop and disable the unauthorized/legacy writer if ownership is proven.

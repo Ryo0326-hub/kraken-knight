@@ -1,0 +1,66 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kraken-knight"
+version = "0.1.0"
+description = "A causal, auditable BTC/CAD systematic trading research and execution platform."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+authors = [{ name = "Ryo Kitano" }]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Office/Business :: Financial :: Investment",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.15",
+  "pytest>=8.3",
+  "pytest-cov>=6.0",
+  "ruff>=0.11",
+]
+
+[project.scripts]
+kraken-knight = "kraken_knight.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kraken_knight"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers -ra"
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["kraken_knight"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 85
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "RUF"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+pretty = true
+files = ["src", "tests"]

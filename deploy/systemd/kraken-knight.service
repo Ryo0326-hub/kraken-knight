@@ -1,0 +1,59 @@
+[Unit]
+Description=Kraken Knight daily BTC/CAD decision job
+Documentation=https://github.com/Ryo0326-hub/kraken-knight
+Wants=network-online.target
+After=network-online.target
+ConditionPathIsDirectory=/opt/kraken-knight/current
+
+[Service]
+Type=oneshot
+User=kraken-knight
+Group=kraken-knight
+WorkingDirectory=/opt/kraken-knight/current
+EnvironmentFile=/etc/kraken-knight/config.env
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+
+# Checkpoint 1 is deliberately local-only. The daily strategy command replaces
+# the second line only after its paper/shadow release gates are implemented.
+ExecStart=/opt/kraken-knight/current/.venv/bin/kraken-knight init
+ExecStart=/opt/kraken-knight/current/.venv/bin/kraken-knight status
+
+StateDirectory=kraken-knight
+StateDirectoryMode=0700
+RuntimeDirectory=kraken-knight
+RuntimeDirectoryMode=0700
+
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+ReadOnlyPaths=/etc/kraken-knight/config.env
+ReadWritePaths=/var/lib/kraken-knight
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+TasksMax=64
+MemoryMax=512M
+TimeoutStartSec=5min
+
+[Install]
+WantedBy=multi-user.target

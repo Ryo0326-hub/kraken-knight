@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan Git history for secrets
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Install project and development tools
+        run: uv sync --locked --extra dev --no-editable
+
+      - name: Check formatting
+        run: .venv/bin/ruff format --check .
+
+      - name: Lint
+        run: .venv/bin/ruff check .
+
+      - name: Type-check
+        run: .venv/bin/mypy
+
+      - name: Test
+        run: .venv/bin/pytest --cov=kraken_knight --cov-report=term-missing
+
+      - name: Build wheel and source distribution
+        run: uv build
+
+      - name: Install and smoke-test the built wheel
+        run: |
+          release_root="$(mktemp -d)"
+          state_dir="$(mktemp -d)"
+          uv venv "$release_root/venv" --python 3.12
+          uv pip install --python "$release_root/venv/bin/python" dist/*.whl
+          KRAKEN_KNIGHT_STATE_DIR="$state_dir" "$release_root/venv/bin/kraken-knight" init --json
+          KRAKEN_KNIGHT_STATE_DIR="$state_dir" "$release_root/venv/bin/kraken-knight" status --json
+
+      - name: Verify systemd unit syntax
+        run: |
+          sudo systemd-sysusers deploy/systemd/kraken-knight.sysusers.conf
+          sudo install -d /opt/kraken-knight/current/.venv/bin /etc/kraken-knight
+          sudo ln -sf /usr/bin/true /opt/kraken-knight/current/.venv/bin/kraken-knight
+          sudo install -m 0640 /dev/null /etc/kraken-knight/config.env
+          systemd-analyze verify deploy/systemd/kraken-knight.service deploy/systemd/kraken-knight.timer

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Kraken Knight once daily at 00:15 UTC
+
+[Timer]
+OnCalendar=*-*-* 00:15:00 UTC
+AccuracySec=1s
+Persistent=no
+RandomizedDelaySec=0
+Unit=kraken-knight.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,450 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
+import pytest
+
+from kraken_knight.backtest import (
+    BacktestConfig,
+    ExecutionCosts,
+    ExecutionOutcome,
+    Liquidity,
+    RiskEventType,
+    TradeSide,
+    run_backtest,
+)
+from kraken_knight.domain import Candle
+
+START = datetime(2025, 1, 1, tzinfo=UTC)
+
+
+def candle(
+    day: int,
+    close: Decimal,
+    *,
+    open_price: Decimal | None = None,
+    complete: bool = True,
+    date_offset: int = 0,
+) -> Candle:
+    opening = open_price if open_price is not None else close
+    return Candle(
+        open_time=START + timedelta(days=day + date_offset),
+        open=opening,
+        high=max(opening, close) + Decimal("2"),
+        low=min(opening, close) - Decimal("2"),
+        close=close,
+        volume=Decimal("5"),
+        complete=complete,
+    )
+
+
+def rising(
+    count: int,
+    *,
+    execution_open: Decimal | None = None,
+    execution_day: int = 201,
+) -> list[Candle]:
+    result: list[Candle] = []
+    for day in range(count):
+        close = (
+            Decimal("100")
+            + Decimal(day) * Decimal("0.2")
+            + (Decimal("0.03") if day % 3 == 0 else Decimal("0"))
+        )
+        opening = execution_open if day == execution_day and execution_open is not None else close
+        result.append(candle(day, close, open_price=opening))
+    return result
+
+
+def zero_band_config(*, costs: ExecutionCosts | None = None) -> BacktestConfig:
+    return BacktestConfig(
+        initial_cash=Decimal("1000"),
+        costs=costs or ExecutionCosts(),
+        rebalance_min_cad=Decimal("0"),
+        rebalance_equity_fraction=Decimal("0"),
+    )
+
+
+def test_signal_executes_only_at_next_candle_open() -> None:
+    candles = rising(202, execution_open=Decimal("500"))
+
+    result = run_backtest(candles, config=zero_band_config())
+
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.execution_time == candles[201].open_time
+    assert trade.reference_price == Decimal("500")
+    assert trade.execution_time == result.decisions[-1].execution_time
+    assert result.decisions[-1].signal_time == candles[199].close_time
+    assert result.decisions[-1].decision_time == candles[199].close_time + timedelta(minutes=15)
+    assert result.decisions[-1].execution_time >= result.decisions[-1].decision_time
+    assert trade.decision_time == result.decisions[-1].decision_time
+    assert result.strategy_decisions[-1].signal_close_time == candles[199].close_time
+    assert result.strategy_decisions[-1].momentum is not None
+    assert result.strategy_decisions[-1].sma is not None
+    assert result.strategy_decisions[-1].annualized_volatility is not None
+
+
+def test_next_candle_close_cannot_change_pending_trade() -> None:
+    base = rising(202, execution_open=Decimal("500"))
+    changed = list(base)
+    changed[201] = candle(
+        201,
+        Decimal("900"),
+        open_price=Decimal("500"),
+    )
+
+    original_result = run_backtest(base, config=zero_band_config())
+    changed_result = run_backtest(changed, config=zero_band_config())
+
+    assert original_result.trades == changed_result.trades
+    assert original_result.decisions == changed_result.decisions
+    assert original_result.metrics.final_equity != changed_result.metrics.final_equity
+
+
+def test_fee_and_slippage_costs_are_accounted_exactly() -> None:
+    costs = ExecutionCosts(
+        maker_fee_rate=Decimal("0.01"),
+        taker_fee_rate=Decimal("0.02"),
+        slippage_rate=Decimal("0.02"),
+        buy_liquidity=Liquidity.MAKER,
+        sell_liquidity=Liquidity.TAKER,
+    )
+    candles = rising(202, execution_open=Decimal("500"))
+
+    result = run_backtest(candles, config=zero_band_config(costs=costs))
+    trade = result.trades[0]
+    expected_execution_price = Decimal("500") * Decimal("1.02")
+    expected_quantity = Decimal("800") / (expected_execution_price * Decimal("1.01"))
+    expected_notional = expected_quantity * expected_execution_price
+    expected_fee = expected_notional * Decimal("0.01")
+
+    assert trade.side is TradeSide.BUY
+    assert trade.liquidity is Liquidity.MAKER
+    assert trade.quantity_btc == expected_quantity
+    assert trade.execution_price == expected_execution_price
+    assert trade.gross_notional_cad == expected_notional
+    assert trade.slippage_cad == expected_quantity * Decimal("10")
+    assert trade.fee_cad == expected_fee
+    assert trade.cash_after == Decimal("1000") - expected_notional - expected_fee
+    assert trade.cash_after == Decimal("200")
+    assert result.metrics.total_fees == expected_fee
+    assert result.metrics.fee_drag == expected_fee / Decimal("1000")
+    assert result.metrics.trade_count == 1
+
+
+def test_rebalance_band_is_maximum_of_cad_floor_and_equity_fraction() -> None:
+    candles = rising(202)
+    config = BacktestConfig(
+        rebalance_min_cad=Decimal("900"),
+        rebalance_equity_fraction=Decimal("0.05"),
+    )
+
+    result = run_backtest(candles, config=config)
+
+    assert result.trades == ()
+    final_decision = result.decisions[-1]
+    assert Decimal("0") < final_decision.requested_delta_cad < Decimal("800")
+    assert final_decision.rebalance_band_cad == Decimal("900")
+    assert final_decision.outcome is ExecutionOutcome.WITHIN_BAND
+
+
+def test_exit_uses_configured_taker_fee() -> None:
+    candles = rising(203, execution_open=Decimal("500"))
+    # Candle 200 is unknown to the entry decision. Its crash becomes a risk-off
+    # signal at 00:15 after candle 201 opens, so it executes at candle 202.
+    candles[200] = candle(200, Decimal("50"), open_price=Decimal("500"))
+    candles[201] = candle(201, Decimal("50"), open_price=Decimal("500"))
+    candles[202] = candle(202, Decimal("52"), open_price=Decimal("50"))
+    costs = ExecutionCosts(
+        maker_fee_rate=Decimal("0.004"),
+        taker_fee_rate=Decimal("0.008"),
+        slippage_rate=Decimal("0"),
+        buy_liquidity=Liquidity.MAKER,
+        sell_liquidity=Liquidity.TAKER,
+    )
+
+    config = BacktestConfig(
+        costs=costs,
+        rebalance_min_cad=Decimal("0"),
+        rebalance_equity_fraction=Decimal("0"),
+        max_drawdown_threshold=Decimal("0.99"),
+    )
+    result = run_backtest(candles, config=config)
+
+    assert [trade.side for trade in result.trades] == [TradeSide.BUY, TradeSide.SELL]
+    sale = result.trades[1]
+    assert sale.liquidity is Liquidity.TAKER
+    assert sale.fee_cad == sale.gross_notional_cad * Decimal("0.008")
+    assert result.metrics.total_fees == sum(
+        (trade.fee_cad for trade in result.trades), start=Decimal("0")
+    )
+
+
+def test_risk_off_transition_bypasses_normal_rebalance_band() -> None:
+    candles = rising(203, execution_open=Decimal("500"))
+    candles[200] = candle(200, Decimal("10"), open_price=Decimal("500"))
+    candles[201] = candle(201, Decimal("10"), open_price=Decimal("500"))
+    candles[202] = candle(202, Decimal("11"), open_price=Decimal("10"))
+
+    result = run_backtest(
+        candles,
+        config=BacktestConfig(max_drawdown_threshold=Decimal("0.99")),
+    )
+
+    assert [trade.side for trade in result.trades] == [TradeSide.BUY, TradeSide.SELL]
+    sale = result.trades[-1]
+    assert sale.gross_notional_cad < Decimal("50")
+    assert sale.quantity_btc == result.trades[0].quantity_btc
+
+
+def test_signal_does_not_execute_after_a_gap() -> None:
+    candles = rising(202, execution_open=Decimal("500"))
+    final = candles[-1]
+    candles[-1] = Candle(
+        open_time=final.open_time + timedelta(days=1),
+        open=final.open,
+        high=final.high,
+        low=final.low,
+        close=final.close,
+        volume=final.volume,
+    )
+
+    result = run_backtest(candles, config=zero_band_config())
+
+    assert result.trades == ()
+    assert result.decisions[-1].signal_time == candles[-3].close_time
+    assert result.decisions[-1].outcome is ExecutionOutcome.NO_ACTION_STALE_SIGNAL
+
+
+def test_invalid_data_does_not_liquidate_an_existing_position() -> None:
+    candles = rising(206)
+    for index in range(203, 206):
+        candles[index] = candle(index, candles[index].close, date_offset=1)
+
+    result = run_backtest(candles)
+
+    assert result.trades[0].side is TradeSide.BUY
+    assert all(trade.side is not TradeSide.SELL for trade in result.trades)
+    assert result.equity_curve[-1].btc > 0
+    assert result.decisions[-2].outcome is ExecutionOutcome.NO_ACTION_STALE_SIGNAL
+    assert result.decisions[-1].outcome is ExecutionOutcome.NO_ACTION_DATA_INVALID
+
+
+def test_backtest_rejects_incomplete_duplicate_and_out_of_order_candles() -> None:
+    incomplete = rising(2)
+    incomplete[1] = candle(1, Decimal("101"), complete=False)
+    with pytest.raises(ValueError, match="incomplete"):
+        run_backtest(incomplete)
+
+    duplicate = [candle(0, Decimal("100")), candle(0, Decimal("101"))]
+    with pytest.raises(ValueError, match="strictly increasing"):
+        run_backtest(duplicate)
+
+    with pytest.raises(ValueError, match="strictly increasing"):
+        run_backtest(list(reversed(rising(2))))
+
+
+def test_gap_inside_signal_history_fails_closed_without_trading() -> None:
+    candles = rising(203)
+    del candles[150]
+
+    result = run_backtest(candles, config=zero_band_config())
+
+    assert result.trades == ()
+    assert result.decisions[-1].strategy_reason == "invalid_sequence"
+
+
+def test_results_and_audit_ids_are_deterministic() -> None:
+    candles = rising(203)
+    config = zero_band_config()
+
+    first = run_backtest(candles, config=config)
+    second = run_backtest(tuple(candles), config=config)
+
+    assert first == second
+    assert first.trades[0].trade_id.startswith("trade_")
+    assert first.decisions[-1].intent_id.startswith("intent_")
+
+
+def test_benchmark_and_strategy_metrics_capture_drawdown_and_trade_statistics() -> None:
+    candles = [
+        candle(0, Decimal("100")),
+        candle(1, Decimal("200")),
+        candle(2, Decimal("100")),
+    ]
+
+    result = run_backtest(candles)
+
+    assert result.metrics.initial_equity == Decimal("1000")
+    assert result.metrics.final_equity == Decimal("1000")
+    assert result.metrics.total_return == 0
+    assert result.metrics.max_drawdown == 0
+    assert result.metrics.trade_count == 0
+    assert result.benchmark_metrics.initial_equity == Decimal("1000")
+    assert result.benchmark_metrics.final_equity == Decimal("1000")
+    assert result.benchmark_metrics.max_drawdown == Decimal("0.5")
+    assert result.benchmark_metrics.turnover == 0
+    assert result.benchmark_metrics.total_fees == 0
+
+
+def test_equity_is_fee_aware_and_uses_taker_liquidation_cost() -> None:
+    costs = ExecutionCosts(
+        maker_fee_rate=Decimal("0.01"),
+        taker_fee_rate=Decimal("0.02"),
+        slippage_rate=Decimal("0"),
+    )
+    candles = rising(202, execution_open=Decimal("500"))
+    candles[201] = candle(201, Decimal("500"), open_price=Decimal("500"))
+
+    result = run_backtest(candles, config=zero_band_config(costs=costs))
+
+    final = result.equity_curve[-1]
+    expected_mark = final.btc * Decimal("500")
+    expected_liquidation_fee = expected_mark * Decimal("0.02")
+    assert final.btc_mark_value_cad == expected_mark
+    assert final.estimated_liquidation_fee_cad == expected_liquidation_fee
+    assert final.equity == final.cash + expected_mark - expected_liquidation_fee
+    assert result.trades[0].pre_trade_equity == Decimal("1000")
+
+
+def test_absolute_cap_post_cost_fraction_and_reserve_all_hold_after_entry() -> None:
+    candles = rising(202, execution_open=Decimal("500"))
+    candles[201] = candle(201, Decimal("500"), open_price=Decimal("500"))
+    config = BacktestConfig(
+        initial_cash=Decimal("2000"),
+        cash_reserve_cad=Decimal("200"),
+        absolute_btc_cap_cad=Decimal("800"),
+        max_post_cost_exposure=Decimal("0.80"),
+        rebalance_min_cad=Decimal("0"),
+        rebalance_equity_fraction=Decimal("0"),
+    )
+
+    result = run_backtest(candles, config=config)
+
+    trade = result.trades[0]
+    point = result.equity_curve[-1]
+    post_cost_exposure = point.btc_mark_value_cad - point.estimated_liquidation_fee_cad
+    assert trade.btc_after * trade.reference_price <= Decimal("800")
+    assert post_cost_exposure / point.equity <= Decimal("0.80")
+    assert trade.cash_after >= Decimal("200")
+
+
+def test_absolute_cap_reduction_bypasses_the_normal_rebalance_band() -> None:
+    candles = rising(203, execution_open=Decimal("500"))
+    candles[201] = candle(201, Decimal("500"), open_price=Decimal("500"))
+    candles[202] = candle(202, Decimal("515"), open_price=Decimal("515"))
+
+    result = run_backtest(candles)
+
+    assert [trade.side for trade in result.trades] == [TradeSide.BUY, TradeSide.SELL]
+    assert abs(result.decisions[-1].requested_delta_cad) < Decimal("50")
+    final = result.equity_curve[-1]
+    assert final.btc_mark_value_cad <= Decimal("800")
+
+
+def test_post_cost_fraction_cap_is_enforced_when_it_is_the_binding_limit() -> None:
+    candles = rising(202, execution_open=Decimal("500"))
+    candles[201] = candle(201, Decimal("500"), open_price=Decimal("500"))
+    config = BacktestConfig(
+        cash_reserve_cad=Decimal("0"),
+        absolute_btc_cap_cad=Decimal("5000"),
+        max_post_cost_exposure=Decimal("0.50"),
+        rebalance_min_cad=Decimal("0"),
+        rebalance_equity_fraction=Decimal("0"),
+    )
+
+    result = run_backtest(candles, config=config)
+
+    point = result.equity_curve[-1]
+    post_cost_exposure = point.btc_mark_value_cad - point.estimated_liquidation_fee_cad
+    assert post_cost_exposure / point.equity <= Decimal("0.50")
+    assert post_cost_exposure / point.equity == pytest.approx(Decimal("0.50"))
+
+
+def test_rolling_24h_loss_gate_blocks_only_an_exposure_increase() -> None:
+    candles = rising(203, execution_open=Decimal("500"))
+    candles[201] = candle(201, Decimal("500"), open_price=Decimal("500"))
+    candles[202] = candle(202, Decimal("425"), open_price=Decimal("425"))
+
+    config = BacktestConfig(
+        cash_reserve_cad=Decimal("0"),
+        absolute_btc_cap_cad=Decimal("5000"),
+        rebalance_min_cad=Decimal("0"),
+        rebalance_equity_fraction=Decimal("0"),
+    )
+    result = run_backtest(candles, config=config)
+
+    assert [trade.side for trade in result.trades] == [TradeSide.BUY]
+    assert result.decisions[-1].outcome is ExecutionOutcome.NO_ACTION_RISK_GATE
+    event_types = [event.event_type for event in result.risk_events]
+    assert RiskEventType.ROLLING_24H_LOSS_GATE in event_types
+    assert RiskEventType.EXPOSURE_INCREASE_BLOCKED in event_types
+    assert not result.final_risk_state.drawdown_disarmed
+
+
+def test_drawdown_disarm_forces_liquidation_and_persists() -> None:
+    candles = rising(204, execution_open=Decimal("500"))
+    candles[201] = candle(201, Decimal("500"), open_price=Decimal("500"))
+    candles[202] = candle(202, Decimal("350"), open_price=Decimal("350"))
+    candles[203] = candle(203, Decimal("360"), open_price=Decimal("360"))
+
+    result = run_backtest(candles, config=zero_band_config())
+
+    assert [trade.side for trade in result.trades] == [TradeSide.BUY, TradeSide.SELL]
+    assert result.decisions[-2].outcome is ExecutionOutcome.FORCED_LIQUIDATION
+    assert result.decisions[-1].outcome is ExecutionOutcome.NO_ACTION_DISARMED
+    assert result.equity_curve[-1].btc == 0
+    assert result.final_risk_state.drawdown_disarmed
+    event_types = [event.event_type for event in result.risk_events]
+    assert RiskEventType.DRAWDOWN_DISARMED in event_types
+    assert RiskEventType.FORCED_LIQUIDATION in event_types
+
+
+def test_result_retains_exact_configuration_and_strategy_policy() -> None:
+    config = BacktestConfig(max_post_cost_exposure=Decimal("0.60"))
+
+    result = run_backtest(rising(3), config=config)
+
+    assert result.config is config
+    assert result.policy.momentum_days == 90
+    assert result.policy.trend_days == 200
+    assert result.policy.volatility_days == 30
+
+
+@pytest.mark.parametrize(
+    "costs",
+    [
+        {"maker_fee_rate": Decimal("-0.1")},
+        {"taker_fee_rate": Decimal("1")},
+        {"slippage_rate": Decimal("1")},
+        {"buy_liquidity": "unknown"},
+    ],
+)
+def test_execution_costs_reject_invalid_assumptions(costs: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        ExecutionCosts(**costs)  # type: ignore[arg-type]
+
+
+def test_backtest_config_rejects_invalid_risk_inputs() -> None:
+    with pytest.raises(ValueError, match="initial_cash"):
+        BacktestConfig(initial_cash=Decimal("0"))
+    with pytest.raises(ValueError, match="cash_reserve"):
+        BacktestConfig(cash_reserve_cad=Decimal("-1"))
+    with pytest.raises(ValueError, match="rebalance_min"):
+        BacktestConfig(rebalance_min_cad=Decimal("-1"))
+    with pytest.raises(ValueError, match="fraction"):
+        BacktestConfig(rebalance_equity_fraction=Decimal("1.1"))
+    with pytest.raises(ValueError, match="absolute_btc_cap"):
+        BacktestConfig(absolute_btc_cap_cad=Decimal("-1"))
+    with pytest.raises(ValueError, match="max_post_cost_exposure"):
+        BacktestConfig(max_post_cost_exposure=Decimal("1.1"))
+    with pytest.raises(ValueError, match="rolling_24h"):
+        BacktestConfig(rolling_24h_loss_threshold=Decimal("0"))
+    with pytest.raises(ValueError, match="max_drawdown"):
+        BacktestConfig(max_drawdown_threshold=Decimal("1"))
+    with pytest.raises(ValueError, match="decision_delay"):
+        BacktestConfig(decision_delay_minutes=0)
+    with pytest.raises(ValueError, match="execution_lag"):
+        BacktestConfig(daily_execution_lag_days=0)

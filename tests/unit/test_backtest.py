@@ -7,6 +7,7 @@ import pytest
 
 from kraken_knight.backtest import (
     BacktestConfig,
+    DrawdownPolicyMode,
     ExecutionCosts,
     ExecutionOutcome,
     ExecutionReference,
@@ -17,6 +18,7 @@ from kraken_knight.backtest import (
     run_backtest,
 )
 from kraken_knight.domain import Candle
+from kraken_knight.strategy import MomentumTrendStrategy, StrategyPolicy
 
 START = datetime(2025, 1, 1, tzinfo=UTC)
 
@@ -68,19 +70,53 @@ def zero_band_config(*, costs: ExecutionCosts | None = None) -> BacktestConfig:
     )
 
 
+def short_window_strategy() -> MomentumTrendStrategy:
+    return MomentumTrendStrategy(
+        StrategyPolicy(
+            momentum_days=1,
+            trend_days=2,
+            volatility_days=2,
+        )
+    )
+
+
+def cooldown_rearm_candles() -> list[Candle]:
+    candles = [
+        candle(0, Decimal("100")),
+        candle(1, Decimal("105")),
+        candle(2, Decimal("110")),
+        candle(3, Decimal("115")),
+        candle(4, Decimal("200"), open_price=Decimal("115")),
+        candle(5, Decimal("100"), open_price=Decimal("100")),
+    ]
+    candles.extend(
+        candle(day, Decimal("100") if day % 2 else Decimal("99")) for day in range(6, 93)
+    )
+    candles.extend(
+        (
+            candle(93, Decimal("105")),
+            candle(94, Decimal("110")),
+            candle(95, Decimal("115"), open_price=Decimal("110")),
+            candle(96, Decimal("115"), open_price=Decimal("115")),
+        )
+    )
+    return candles
+
+
 def precise_reference(
     candles: list[Candle],
     execution_index: int,
     price: Decimal,
     *,
     minute_offset: int = 0,
+    volume_btc: Decimal = Decimal("1.25"),
 ) -> ExecutionReference:
     decision_time = candles[execution_index - 1].close_time + timedelta(minutes=15)
     return ExecutionReference(
         decision_time=decision_time,
         execution_time=decision_time + timedelta(minutes=minute_offset),
         reference_price=price,
-        volume_btc=Decimal("1.25"),
+        volume_btc=volume_btc,
         trade_count=7,
     )
 
@@ -426,6 +462,392 @@ def test_drawdown_disarm_forces_liquidation_and_persists() -> None:
         if event.event_type is RiskEventType.FORCED_LIQUIDATION
     )
     assert forced_event.action == "completed_forced_liquidation;remaining_btc=0"
+    assert result.config.drawdown_policy_mode is DrawdownPolicyMode.PERSISTENT
+    assert result.final_risk_state.drawdown_policy_mode is DrawdownPolicyMode.PERSISTENT
+    assert result.final_risk_state.risk_epoch == 1
+    assert result.final_risk_state.drawdown_disarmed_at == candles[202].open_time
+    assert result.final_risk_state.drawdown_rearm_eligible_at is None
+    assert result.final_risk_state.last_drawdown_rearmed_at is None
+
+
+def test_disabled_drawdown_policy_never_disarms_or_forces_liquidation() -> None:
+    candles = cooldown_rearm_candles()[:6]
+    result = run_backtest(
+        candles,
+        strategy=short_window_strategy(),
+        config=BacktestConfig(
+            drawdown_policy_mode=DrawdownPolicyMode.DISABLED,
+            rebalance_min_cad=Decimal("0"),
+            rebalance_equity_fraction=Decimal("0"),
+        ),
+    )
+
+    assert [trade.side for trade in result.trades] == [TradeSide.BUY]
+    assert result.equity_curve[-1].btc > 0
+    assert not result.final_risk_state.drawdown_disarmed
+    assert result.final_risk_state.drawdown_policy_mode is DrawdownPolicyMode.DISABLED
+    assert result.final_risk_state.risk_epoch == 1
+    assert all(
+        event.event_type not in {RiskEventType.DRAWDOWN_DISARMED, RiskEventType.DRAWDOWN_REARMED}
+        for event in result.risk_events
+    )
+
+
+def test_disabled_drawdown_policy_keeps_the_independent_rolling_loss_gate() -> None:
+    candles = rising(203, execution_open=Decimal("500"))
+    candles[201] = candle(201, Decimal("500"), open_price=Decimal("500"))
+    candles[202] = candle(202, Decimal("425"), open_price=Decimal("425"))
+    result = run_backtest(
+        candles,
+        config=BacktestConfig(
+            drawdown_policy_mode=DrawdownPolicyMode.DISABLED,
+            cash_reserve_cad=Decimal("0"),
+            absolute_btc_cap_cad=Decimal("5000"),
+            rebalance_min_cad=Decimal("0"),
+            rebalance_equity_fraction=Decimal("0"),
+        ),
+    )
+
+    assert result.decisions[-1].outcome is ExecutionOutcome.NO_ACTION_RISK_GATE
+    assert RiskEventType.ROLLING_24H_LOSS_GATE in {event.event_type for event in result.risk_events}
+    assert RiskEventType.EXPOSURE_INCREASE_BLOCKED in {
+        event.event_type for event in result.risk_events
+    }
+    assert RiskEventType.DRAWDOWN_DISARMED not in {event.event_type for event in result.risk_events}
+
+
+def test_cooldown_policy_rearms_after_90_days_on_current_causal_long_signal() -> None:
+    candles = cooldown_rearm_candles()
+    result = run_backtest(
+        candles,
+        strategy=short_window_strategy(),
+        config=BacktestConfig(
+            drawdown_policy_mode=DrawdownPolicyMode.COOLDOWN_REARM,
+            rebalance_min_cad=Decimal("0"),
+            rebalance_equity_fraction=Decimal("0"),
+        ),
+    )
+
+    disarm_event = next(
+        event for event in result.risk_events if event.event_type is RiskEventType.DRAWDOWN_DISARMED
+    )
+    rearm_event = next(
+        event for event in result.risk_events if event.event_type is RiskEventType.DRAWDOWN_REARMED
+    )
+    rearm_eligible_at = disarm_event.observed_at + timedelta(days=90)
+    expected_rearm_time = candles[94].close_time + timedelta(minutes=15)
+
+    assert rearm_event.observed_at == expected_rearm_time
+    assert rearm_event.observed_at >= rearm_eligible_at
+    assert result.decisions[-2].outcome is ExecutionOutcome.NO_ACTION_DISARMED
+    assert result.decisions[-1].outcome is ExecutionOutcome.BUY
+    assert result.trades[-1].side is TradeSide.BUY
+    assert rearm_event.strategy_decision_id == result.strategy_decisions[-1].decision_id
+    assert rearm_event.reference_equity > rearm_event.equity
+    assert result.final_risk_state.high_water_equity == rearm_event.equity
+    assert not result.final_risk_state.drawdown_disarmed
+    assert result.final_risk_state.risk_epoch == 2
+    assert result.final_risk_state.drawdown_disarmed_at is None
+    assert result.final_risk_state.drawdown_rearm_eligible_at is None
+    assert result.final_risk_state.last_drawdown_rearmed_at == expected_rearm_time
+    assert disarm_event.risk_epoch == 1
+    assert rearm_event.risk_epoch == 2
+    assert rearm_event.action == (
+        "rearm_after_cooldown_on_causal_long_signal;"
+        f"risk_epoch=2;high_water_equity={rearm_event.equity}"
+    )
+
+
+def test_cooldown_policy_stays_disarmed_without_an_eligible_long_signal() -> None:
+    candles = cooldown_rearm_candles()
+    candles[94] = candle(94, Decimal("98"))
+    candles[95] = candle(95, Decimal("97"))
+    candles[96] = candle(96, Decimal("96"))
+    result = run_backtest(
+        candles,
+        strategy=short_window_strategy(),
+        config=BacktestConfig(
+            drawdown_policy_mode=DrawdownPolicyMode.COOLDOWN_REARM,
+            rebalance_min_cad=Decimal("0"),
+            rebalance_equity_fraction=Decimal("0"),
+        ),
+    )
+
+    assert result.final_risk_state.drawdown_rearm_eligible_at is not None
+    assert result.strategy_decisions[-1].target_weight == 0
+    assert result.decisions[-1].outcome is ExecutionOutcome.NO_ACTION_DISARMED
+    assert all(
+        event.event_type is not RiskEventType.DRAWDOWN_REARMED for event in result.risk_events
+    )
+
+
+def test_cooldown_rearm_does_not_require_same_day_execution_reference() -> None:
+    candles = cooldown_rearm_candles()
+    entry = precise_reference(candles, 4, Decimal("115"), volume_btc=Decimal("100"))
+    drawdown_exit = precise_reference(candles, 5, Decimal("100"), volume_btc=Decimal("100"))
+    result = run_backtest(
+        candles,
+        strategy=short_window_strategy(),
+        config=BacktestConfig(
+            drawdown_policy_mode=DrawdownPolicyMode.COOLDOWN_REARM,
+            rebalance_min_cad=Decimal("0"),
+            rebalance_equity_fraction=Decimal("0"),
+        ),
+        execution_references=(entry, drawdown_exit),
+        evaluation_start=entry.decision_time,
+    )
+
+    rearm_event = next(
+        event for event in result.risk_events if event.event_type is RiskEventType.DRAWDOWN_REARMED
+    )
+    disarm_event = next(
+        event for event in result.risk_events if event.event_type is RiskEventType.DRAWDOWN_DISARMED
+    )
+
+    assert rearm_event.observed_at == disarm_event.observed_at + timedelta(days=90)
+    assert result.decisions[-1].outcome is ExecutionOutcome.NO_FILL_REFERENCE_UNAVAILABLE
+    assert [trade.side for trade in result.trades] == [TradeSide.BUY, TradeSide.SELL]
+    assert not result.final_risk_state.drawdown_disarmed
+    assert result.final_risk_state.risk_epoch == 2
+    assert result.equity_curve[-1].btc == 0
+
+
+def test_rearm_uses_decision_time_not_a_later_execution_reference_boundary() -> None:
+    candles = cooldown_rearm_candles()
+    entry = precise_reference(candles, 4, Decimal("115"), volume_btc=Decimal("100"))
+    drawdown_exit = precise_reference(
+        candles,
+        5,
+        Decimal("100"),
+        minute_offset=1,
+        volume_btc=Decimal("100"),
+    )
+    boundary_reference = precise_reference(
+        candles,
+        95,
+        Decimal("110"),
+        minute_offset=1,
+        volume_btc=Decimal("100"),
+    )
+    result = run_backtest(
+        candles,
+        strategy=short_window_strategy(),
+        config=BacktestConfig(
+            drawdown_policy_mode=DrawdownPolicyMode.COOLDOWN_REARM,
+            rebalance_min_cad=Decimal("0"),
+            rebalance_equity_fraction=Decimal("0"),
+        ),
+        execution_references=(entry, drawdown_exit, boundary_reference),
+        evaluation_start=entry.decision_time,
+    )
+
+    disarm_event = next(
+        event for event in result.risk_events if event.event_type is RiskEventType.DRAWDOWN_DISARMED
+    )
+    rearm_event = next(
+        event for event in result.risk_events if event.event_type is RiskEventType.DRAWDOWN_REARMED
+    )
+    eligible_at = disarm_event.observed_at + timedelta(days=90)
+
+    assert boundary_reference.decision_time < eligible_at
+    assert boundary_reference.execution_time == eligible_at
+    assert result.decisions[-2].outcome is ExecutionOutcome.NO_ACTION_DISARMED
+    assert rearm_event.observed_at == result.decisions[-1].decision_time
+    assert rearm_event.observed_at > eligible_at
+    assert result.decisions[-1].outcome is ExecutionOutcome.NO_FILL_REFERENCE_UNAVAILABLE
+    assert not result.final_risk_state.drawdown_disarmed
+
+
+def test_eligible_precise_rearm_executes_capped_buy_after_decision_event() -> None:
+    candles = cooldown_rearm_candles()
+    entry = precise_reference(candles, 4, Decimal("115"), volume_btc=Decimal("100"))
+    drawdown_exit = precise_reference(candles, 5, Decimal("100"), volume_btc=Decimal("100"))
+    capped_reentry = precise_reference(
+        candles,
+        95,
+        Decimal("110"),
+        minute_offset=2,
+        volume_btc=Decimal("0.5"),
+    )
+    result = run_backtest(
+        candles,
+        strategy=short_window_strategy(),
+        config=BacktestConfig(
+            drawdown_policy_mode=DrawdownPolicyMode.COOLDOWN_REARM,
+            max_execution_volume_fraction=Decimal("0.10"),
+            rebalance_min_cad=Decimal("0"),
+            rebalance_equity_fraction=Decimal("0"),
+        ),
+        execution_references=(entry, drawdown_exit, capped_reentry),
+        evaluation_start=entry.decision_time,
+    )
+
+    rearm_event = next(
+        event for event in result.risk_events if event.event_type is RiskEventType.DRAWDOWN_REARMED
+    )
+    reentry = next(
+        trade
+        for trade in result.trades
+        if trade.strategy_decision_id == rearm_event.strategy_decision_id
+    )
+
+    assert rearm_event.observed_at == capped_reentry.decision_time
+    assert reentry.side is TradeSide.BUY
+    assert reentry.decision_time == rearm_event.observed_at
+    assert reentry.execution_time == capped_reentry.execution_time
+    assert reentry.execution_time > rearm_event.observed_at
+    assert reentry.volume_cap_applied
+    assert reentry.execution_volume_btc == capped_reentry.volume_btc
+    assert reentry.quantity_btc == Decimal("0.05")
+    assert reentry.volume_participation_fraction == Decimal("0.10")
+    assert rearm_event.risk_epoch == 2
+
+
+def test_cooldown_policy_supports_repeated_disarm_and_rearm_epochs() -> None:
+    candles = cooldown_rearm_candles()
+    candles[96] = candle(96, Decimal("230"), open_price=Decimal("115"))
+    candles.append(candle(97, Decimal("100"), open_price=Decimal("100")))
+    candles.extend(
+        candle(day, Decimal("100") if day % 2 else Decimal("99")) for day in range(98, 186)
+    )
+    candles.extend(
+        (
+            candle(186, Decimal("105")),
+            candle(187, Decimal("110")),
+            candle(188, Decimal("110"), open_price=Decimal("110")),
+        )
+    )
+    result = run_backtest(
+        candles,
+        strategy=short_window_strategy(),
+        config=BacktestConfig(
+            drawdown_policy_mode=DrawdownPolicyMode.COOLDOWN_REARM,
+            rebalance_min_cad=Decimal("0"),
+            rebalance_equity_fraction=Decimal("0"),
+        ),
+    )
+
+    disarms = [
+        event for event in result.risk_events if event.event_type is RiskEventType.DRAWDOWN_DISARMED
+    ]
+    rearms = [
+        event for event in result.risk_events if event.event_type is RiskEventType.DRAWDOWN_REARMED
+    ]
+
+    assert [event.risk_epoch for event in disarms] == [1, 2]
+    assert [event.risk_epoch for event in rearms] == [2, 3]
+    assert rearms[0].observed_at >= disarms[0].observed_at + timedelta(days=90)
+    assert rearms[1].observed_at >= disarms[1].observed_at + timedelta(days=90)
+    assert [trade.side for trade in result.trades] == [
+        TradeSide.BUY,
+        TradeSide.SELL,
+        TradeSide.BUY,
+        TradeSide.SELL,
+        TradeSide.BUY,
+    ]
+    assert not result.final_risk_state.drawdown_disarmed
+    assert result.final_risk_state.risk_epoch == 3
+    assert result.final_risk_state.last_drawdown_rearmed_at == rearms[-1].observed_at
+
+
+def test_partial_liquidation_blocks_rearm_until_btc_is_zero() -> None:
+    candles = cooldown_rearm_candles()
+    entry = precise_reference(candles, 4, Decimal("115"), volume_btc=Decimal("100"))
+    partial_exit = ExecutionReference(
+        decision_time=candles[4].close_time + timedelta(minutes=15),
+        execution_time=candles[4].close_time + timedelta(minutes=16),
+        reference_price=Decimal("100"),
+        volume_btc=Decimal("0.01"),
+        trade_count=2,
+    )
+    eventual_exit = precise_reference(
+        candles,
+        96,
+        Decimal("115"),
+        volume_btc=Decimal("100"),
+    )
+    result = run_backtest(
+        candles,
+        strategy=short_window_strategy(),
+        config=BacktestConfig(
+            drawdown_policy_mode=DrawdownPolicyMode.COOLDOWN_REARM,
+            max_execution_volume_fraction=Decimal("0.10"),
+            max_drawdown_threshold=Decimal("0.01"),
+            rebalance_min_cad=Decimal("0"),
+            rebalance_equity_fraction=Decimal("0"),
+        ),
+        execution_references=(entry, partial_exit, eventual_exit),
+        evaluation_start=entry.decision_time,
+    )
+
+    assert result.decisions[1].outcome is ExecutionOutcome.FORCED_LIQUIDATION_PARTIAL_VOLUME_CAPPED
+    assert result.decisions[-1].outcome is ExecutionOutcome.FORCED_LIQUIDATION
+    assert result.decisions[-1].remaining_btc == 0
+    assert all(
+        event.event_type is not RiskEventType.DRAWDOWN_REARMED for event in result.risk_events
+    )
+    assert result.final_risk_state.drawdown_disarmed
+    assert result.final_risk_state.risk_epoch == 1
+    assert result.equity_curve[-1].btc == 0
+
+
+def test_exchange_minimum_dust_remains_disarmed_after_cooldown() -> None:
+    candles = cooldown_rearm_candles()
+    entry = precise_reference(candles, 4, Decimal("115"), volume_btc=Decimal("100"))
+    dust_creating_exit = precise_reference(
+        candles,
+        5,
+        Decimal("100"),
+        volume_btc=Decimal("0.0005"),
+    )
+    eligible_attempt = precise_reference(
+        candles,
+        95,
+        Decimal("110"),
+        volume_btc=Decimal("100"),
+    )
+    result = run_backtest(
+        candles,
+        strategy=short_window_strategy(),
+        config=BacktestConfig(
+            initial_cash=Decimal("0.01"),
+            cash_reserve_cad=Decimal("0"),
+            absolute_btc_cap_cad=Decimal("0.0069"),
+            max_post_cost_exposure=Decimal("1"),
+            instrument_rules=InstrumentRules(
+                price_tick_cad=Decimal("0.1"),
+                quantity_increment_btc=Decimal("0.00001"),
+                minimum_quantity_btc=Decimal("0.00005"),
+                minimum_cost_cad=Decimal("0.001"),
+            ),
+            drawdown_policy_mode=DrawdownPolicyMode.COOLDOWN_REARM,
+            max_execution_volume_fraction=Decimal("0.10"),
+            rebalance_min_cad=Decimal("0"),
+            rebalance_equity_fraction=Decimal("0"),
+        ),
+        execution_references=(entry, dust_creating_exit, eligible_attempt),
+        evaluation_start=entry.decision_time,
+    )
+
+    partial = next(
+        decision
+        for decision in result.decisions
+        if decision.outcome is ExecutionOutcome.FORCED_LIQUIDATION_PARTIAL_VOLUME_CAPPED
+    )
+    dust_attempt = next(
+        decision
+        for decision in result.decisions
+        if decision.decision_time == eligible_attempt.decision_time
+    )
+
+    assert partial.remaining_btc == Decimal("0.00001")
+    assert dust_attempt.outcome is ExecutionOutcome.BELOW_EXCHANGE_MINIMUM
+    assert result.equity_curve[-1].btc == Decimal("0.00001")
+    assert result.final_risk_state.drawdown_disarmed
+    assert result.final_risk_state.risk_epoch == 1
+    assert all(
+        event.event_type is not RiskEventType.DRAWDOWN_REARMED for event in result.risk_events
+    )
 
 
 def test_volume_capped_forced_liquidation_records_partial_attempt_and_remainder() -> None:
@@ -480,6 +902,22 @@ def test_result_retains_exact_configuration_and_strategy_policy() -> None:
     assert result.policy.momentum_days == 90
     assert result.policy.trend_days == 200
     assert result.policy.volatility_days == 30
+
+
+def test_drawdown_policy_configuration_is_explicit_and_frozen() -> None:
+    default = BacktestConfig()
+    disabled = BacktestConfig(drawdown_policy_mode="disabled")  # type: ignore[arg-type]
+
+    assert default.drawdown_policy_mode is DrawdownPolicyMode.PERSISTENT
+    assert default.drawdown_rearm_cooldown_days == 90
+    assert disabled.drawdown_policy_mode is DrawdownPolicyMode.DISABLED
+
+    with pytest.raises(ValueError, match="drawdown_policy_mode"):
+        BacktestConfig(drawdown_policy_mode="automatic")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="exactly 90"):
+        BacktestConfig(drawdown_rearm_cooldown_days=89)
+    with pytest.raises(ValueError, match="exactly 90"):
+        BacktestConfig(drawdown_rearm_cooldown_days=True)
 
 
 @pytest.mark.parametrize(

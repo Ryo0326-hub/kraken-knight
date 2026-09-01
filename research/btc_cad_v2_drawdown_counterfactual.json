@@ -1,0 +1,95 @@
+{
+  "schema_version": "kraken-knight-counterfactual-preregistration-v1",
+  "study_id": "btc_cad_v2_drawdown_counterfactual_preregistered",
+  "analysis_type": "exploratory_counterfactual_after_v1_holdout_opened",
+  "pair": "BTC/CAD",
+  "base_protocol": {
+    "path": "research/btc_cad_v1_backtest.json",
+    "sha256": "95856c4fd857a6789fbf1a224865e7cf72210ba011bb76d88999875234a60749",
+    "inheritance_rule": "all_v1_data_signal_execution_cost_volume_instrument_and_portfolio_rules_unchanged_except_the_named_drawdown_mode",
+    "data_cutoff_exclusive_utc": "2026-01-01T00:00:00Z"
+  },
+  "prior_information": {
+    "v1_result_seen_before_this_specification": true,
+    "v1_holdout_opened": true,
+    "v1_observation": "persistent_drawdown_disarm_removed_all_post_2020_market_exposure",
+    "fresh_out_of_sample_claim_permitted": false,
+    "legacy_split_labels_are_descriptive_only": true
+  },
+  "sealed_v1_reference": {
+    "path": "reports/published/btc-cad-v1-2026-01-01-e22985e",
+    "code_commit": "e22985ec83f3104736f31d5818aa5f1acda39b51",
+    "manifest_sha256": "5deb3d7c665f5ab2b10a75fe27e79b13c5e268a37bf18878f2d045a7d0161001",
+    "checksums_file_sha256": "024352eff7a0d31b29146c3399986ff97dd6f38db4a26974da56a07d41bc3fd2",
+    "daily_equity_sha256": "597f3949acb40be50ba11df2a6246da21167dc752c60137267636bbc35ef3c4e",
+    "metrics_sha256": "03edb127081931f4f1102064d448d3cf2391f7e6e2e41c374f445c9d2546a187",
+    "risk_events_sha256": "d54f90b48840c8a9863e44c657f8a0ef05d8916d7addbb9bdf9b446d916a688d",
+    "expected_primary_final_equity_cad": "1225.272045489520",
+    "expected_primary_trade_count": 56,
+    "expected_disarm_date_utc": "2020-05-21"
+  },
+  "frozen_data_identity": {
+    "normalized_csv_filename": "kraken_xbtcad_daily_archive_2026-01-01.csv",
+    "normalized_csv_sha256": "eab9022203ad161559e03a1bbd9e1519198408b5a0687cd70032cf9a8a9b3ec3",
+    "normalized_manifest_filename": "kraken_xbtcad_daily_archive_2026-01-01.manifest.json",
+    "normalized_manifest_sha256": "3f861b4687b57d1770ba16c13afe726d63366cf101f08dee60ae9f288530c079",
+    "selected_clean_sequence_sha256": "193c8dbee45ba0dc86ab26cf9402ae80cdc0073580a0524d88bbe09b16c33724"
+  },
+  "counterfactual_variants": [
+    {
+      "name": "no_drawdown_gate",
+      "drawdown_mode": "disabled",
+      "maximum_drawdown_threshold_applied": false,
+      "drawdown_forced_liquidation": false,
+      "drawdown_disarm": false,
+      "purpose": "measure_the_frozen_v1_signal_without_a_high_water_drawdown_latch"
+    },
+    {
+      "name": "mechanical_90d_trend_rearm",
+      "drawdown_mode": "cooldown_rearm",
+      "maximum_drawdown_threshold_applied": true,
+      "maximum_drawdown_threshold_inherited": "0.20",
+      "forced_liquidation_inherited": true,
+      "cooldown_calendar_days": 90,
+      "cooldown_clock_starts_at": "drawdown_disarmed_observed_at_utc",
+      "cooldown_eligibility": "causal_decision_time_greater_than_or_equal_to_disarm_observed_at_plus_90_calendar_days",
+      "liquidation_completion_required": true,
+      "rearm_signal_reason": "long_signal",
+      "rearm_signal_definition": "positive_90_day_momentum_and_close_strictly_above_sma200_with_valid_30_day_volatility",
+      "rearm_signal_clock": "same_causal_daily_decision_available_at_00_15_utc",
+      "rearm_event_time": "causal_decision_time_utc",
+      "execution_reference_required_for_state_rearm": false,
+      "rearm_high_water_reset": "current_fee_aware_liquidation_equity",
+      "rearm_decision_may_rebalance": true,
+      "other_risk_and_execution_gates_still_apply": true,
+      "future_disarms_and_rearms_permitted": true,
+      "purpose": "measure_a_fully_mechanical_recovery_policy_without_operator_discretion"
+    }
+  ],
+  "comparators": [
+    "cad_cash",
+    "fee_aware_btc_buy_and_hold",
+    "sealed_frozen_v1_persistent_disarm",
+    "no_drawdown_gate",
+    "mechanical_90d_trend_rearm"
+  ],
+  "evaluation_contract": {
+    "run_each_counterfactual_exactly_once_after_code_tests_and_this_file_are_committed": true,
+    "parameter_optimization_permitted": false,
+    "variant_selection_from_results_permitted": false,
+    "same_normalized_dataset_and_manifest_required": true,
+    "same_causal_clock_required": true,
+    "same_fee_slippage_and_volume_assumptions_required": true,
+    "same_strategy_and_position_sizing_required": true,
+    "same_portfolio_constraints_except_drawdown_mode_required": true,
+    "randomness_permitted": false
+  },
+  "interpretation": {
+    "evidence_scope": "exploratory_historical_counterfactual",
+    "engineering_validation_and_profitability_are_separate": true,
+    "live_trading_authorized": false,
+    "paper_trading_authorized": false,
+    "future_profitability_established": false,
+    "next_independent_evidence": "new_data_after_2026_01_01_or_forward_paper_or_micro_live_observation"
+  }
+}

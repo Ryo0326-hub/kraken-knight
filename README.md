@@ -232,6 +232,14 @@ out-of-sample profitability. See
 [`docs/BACKTEST_RESULTS_2026-01-01.md`](docs/BACKTEST_RESULTS_2026-01-01.md) for
 the graphs, metrics, and interpretation.
 
+The follow-up V2 study keeps that result immutable and separately tests two
+post-holdout counterfactuals: the signal without the drawdown gate, and the same
+20% liquidation followed by a fixed 90-day cooldown plus causal trend rearm.
+All data, timing, costs, and volume assumptions remain unchanged. See
+[`docs/DRAWDOWN_COUNTERFACTUAL.md`](docs/DRAWDOWN_COUNTERFACTUAL.md) for the
+frozen rules and reproducible run contract. These exploratory variants do not
+alter the manual-rearm production policy.
+
 ## Documentation map
 
 - [`docs/STRATEGY_SPEC.md`](docs/STRATEGY_SPEC.md) — frozen signal, sizing, and
@@ -246,6 +254,8 @@ the graphs, metrics, and interpretation.
   Kraken data download, frozen study run, outputs, and interpretation.
 - [`docs/BACKTEST_RESULTS_2026-01-01.md`](docs/BACKTEST_RESULTS_2026-01-01.md) —
   sealed V1 result, visuals, limitations, and next research question.
+- [`docs/DRAWDOWN_COUNTERFACTUAL.md`](docs/DRAWDOWN_COUNTERFACTUAL.md) — frozen
+  post-holdout V2 variants, causal rearm rule, and audit contract.
 - [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — production topology, staged rollout,
   cutover, and rollback.
 - [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — routine operation and incident response.

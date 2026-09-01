@@ -14,7 +14,13 @@ from enum import StrEnum
 from itertools import pairwise
 
 from .domain import Candle, to_decimal
-from .strategy import MomentumTrendStrategy, StrategyDecision, StrategyPolicy
+from .strategy import (
+    DecisionReason,
+    MomentumTrendStrategy,
+    PositionState,
+    StrategyDecision,
+    StrategyPolicy,
+)
 
 
 class Liquidity(StrEnum):
@@ -47,7 +53,21 @@ class RiskEventType(StrEnum):
     ROLLING_24H_LOSS_GATE = "rolling_24h_loss_gate"
     EXPOSURE_INCREASE_BLOCKED = "exposure_increase_blocked"
     DRAWDOWN_DISARMED = "drawdown_disarmed"
+    DRAWDOWN_REARMED = "drawdown_rearmed"
     FORCED_LIQUIDATION = "forced_liquidation"
+
+
+class DrawdownPolicyMode(StrEnum):
+    """Research policy for the high-water drawdown circuit breaker.
+
+    ``PERSISTENT`` is the original fail-closed behavior and remains the default.
+    The other modes are explicit research variants; selecting one cannot happen
+    through an omitted configuration value.
+    """
+
+    PERSISTENT = "persistent"
+    DISABLED = "disabled"
+    COOLDOWN_REARM = "cooldown_rearm"
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +193,8 @@ class BacktestConfig:
     rebalance_equity_fraction: Decimal = Decimal("0.05")
     rolling_24h_loss_threshold: Decimal = Decimal("0.08")
     max_drawdown_threshold: Decimal = Decimal("0.20")
+    drawdown_policy_mode: DrawdownPolicyMode = DrawdownPolicyMode.PERSISTENT
+    drawdown_rearm_cooldown_days: int = 90
     decision_delay_minutes: int = 15
     daily_execution_lag_days: int = 1
 
@@ -199,6 +221,13 @@ class BacktestConfig:
         object.__setattr__(self, "rebalance_equity_fraction", fraction)
         object.__setattr__(self, "rolling_24h_loss_threshold", rolling_loss)
         object.__setattr__(self, "max_drawdown_threshold", max_drawdown)
+        try:
+            drawdown_policy_mode = DrawdownPolicyMode(self.drawdown_policy_mode)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "drawdown_policy_mode must be 'persistent', 'disabled', or 'cooldown_rearm'"
+            ) from exc
+        object.__setattr__(self, "drawdown_policy_mode", drawdown_policy_mode)
         if initial_cash <= 0:
             raise ValueError("initial_cash must be greater than zero")
         if cash_reserve < 0:
@@ -215,6 +244,12 @@ class BacktestConfig:
             raise ValueError("rolling_24h_loss_threshold must be in (0, 1)")
         if max_drawdown <= 0 or max_drawdown >= 1:
             raise ValueError("max_drawdown_threshold must be in (0, 1)")
+        if (
+            isinstance(self.drawdown_rearm_cooldown_days, bool)
+            or not isinstance(self.drawdown_rearm_cooldown_days, int)
+            or self.drawdown_rearm_cooldown_days != 90
+        ):
+            raise ValueError("drawdown_rearm_cooldown_days must be exactly 90")
         if (
             isinstance(self.decision_delay_minutes, bool)
             or not isinstance(self.decision_delay_minutes, int)
@@ -339,6 +374,13 @@ class RiskEvent:
     observed_fraction: Decimal
     threshold: Decimal
     action: str
+    risk_epoch: int = 1
+
+    def __post_init__(self) -> None:
+        if isinstance(self.risk_epoch, bool) or not isinstance(self.risk_epoch, int):
+            raise TypeError("risk_epoch must be an integer")
+        if self.risk_epoch <= 0:
+            raise ValueError("risk_epoch must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -346,6 +388,11 @@ class RiskState:
     high_water_equity: Decimal
     drawdown_disarmed: bool
     rolling_loss_blocked_until: datetime | None
+    drawdown_policy_mode: DrawdownPolicyMode = DrawdownPolicyMode.PERSISTENT
+    risk_epoch: int = 1
+    drawdown_disarmed_at: datetime | None = None
+    drawdown_rearm_eligible_at: datetime | None = None
+    last_drawdown_rearmed_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -976,6 +1023,7 @@ def _risk_event(
     observed_fraction: Decimal,
     threshold: Decimal,
     action: str,
+    risk_epoch: int = 1,
 ) -> RiskEvent:
     fields: dict[str, object] = {
         "event_type": event_type.value,
@@ -997,6 +1045,7 @@ def _risk_event(
         observed_fraction=observed_fraction,
         threshold=threshold,
         action=action,
+        risk_epoch=risk_epoch,
     )
 
 
@@ -1190,6 +1239,10 @@ def run_backtest(
     risk_events: list[RiskEvent] = []
     high_water_equity = initial_snapshot.equity
     drawdown_disarmed = False
+    drawdown_disarmed_at: datetime | None = None
+    drawdown_rearm_eligible_at: datetime | None = None
+    last_drawdown_rearmed_at: datetime | None = None
+    risk_epoch = 1
     rolling_loss_blocked_until: datetime | None = None
     if precise_execution:
         risk_observations = [(initial_time, initial_snapshot.equity)]
@@ -1250,6 +1303,54 @@ def run_backtest(
             instrument_rules=selected_config.instrument_rules,
         )
         high_water_equity = max(high_water_equity, execution_snapshot.equity)
+        drawdown = Decimal("1") - execution_snapshot.equity / high_water_equity
+
+        current_causal_long_signal = (
+            signal is not None
+            and decision_time is not None
+            and signal.usable_data
+            and signal.reason is DecisionReason.LONG_SIGNAL
+            and signal.state is PositionState.BTC
+            and signal.target_weight > 0
+            and signal.signal_close_time == required_signal_close_time
+            and signal.policy_hash == selected_strategy.policy.fingerprint
+        )
+        can_rearm = (
+            selected_config.drawdown_policy_mode is DrawdownPolicyMode.COOLDOWN_REARM
+            and drawdown_disarmed
+            and btc == 0
+            and drawdown_rearm_eligible_at is not None
+            and decision_time is not None
+            and decision_time >= drawdown_rearm_eligible_at
+            and current_causal_long_signal
+        )
+        if can_rearm:
+            assert signal is not None
+            assert decision_time is not None
+            previous_high_water = high_water_equity
+            drawdown_disarmed = False
+            drawdown_disarmed_at = None
+            drawdown_rearm_eligible_at = None
+            last_drawdown_rearmed_at = decision_time
+            risk_epoch += 1
+            high_water_equity = cash
+            risk_events.append(
+                _risk_event(
+                    event_type=RiskEventType.DRAWDOWN_REARMED,
+                    observed_at=decision_time,
+                    strategy_decision_id=signal.decision_id,
+                    equity=cash,
+                    reference_equity=previous_high_water,
+                    observed_fraction=drawdown,
+                    threshold=selected_config.max_drawdown_threshold,
+                    action=(
+                        "rearm_after_cooldown_on_causal_long_signal;"
+                        f"risk_epoch={risk_epoch};high_water_equity={cash}"
+                    ),
+                    risk_epoch=risk_epoch,
+                )
+            )
+            drawdown = Decimal("0")
 
         observation_cutoff = observation_time - timedelta(days=1)
         reference_24h = next(
@@ -1278,6 +1379,7 @@ def run_backtest(
                         observed_fraction=rolling_loss,
                         threshold=selected_config.rolling_24h_loss_threshold,
                         action="block_exposure_increases_for_24h",
+                        risk_epoch=risk_epoch,
                     )
                 )
         if (
@@ -1286,9 +1388,28 @@ def run_backtest(
         ):
             rolling_loss_blocked_until = None
 
-        drawdown = Decimal("1") - execution_snapshot.equity / high_water_equity
-        if not drawdown_disarmed and drawdown >= selected_config.max_drawdown_threshold:
+        drawdown_gate_enabled = (
+            selected_config.drawdown_policy_mode is not DrawdownPolicyMode.DISABLED
+        )
+        if (
+            drawdown_gate_enabled
+            and not drawdown_disarmed
+            and drawdown >= selected_config.max_drawdown_threshold
+        ):
             drawdown_disarmed = True
+            drawdown_disarmed_at = observation_time
+            if selected_config.drawdown_policy_mode is DrawdownPolicyMode.COOLDOWN_REARM:
+                drawdown_rearm_eligible_at = observation_time + timedelta(
+                    days=selected_config.drawdown_rearm_cooldown_days
+                )
+                disarm_action = (
+                    "cooldown_disarm_and_force_liquidation;"
+                    f"rearm_eligible_at={drawdown_rearm_eligible_at.isoformat()};"
+                    f"risk_epoch={risk_epoch}"
+                )
+            else:
+                drawdown_rearm_eligible_at = None
+                disarm_action = "persist_disarm_and_force_liquidation"
             risk_events.append(
                 _risk_event(
                     event_type=RiskEventType.DRAWDOWN_DISARMED,
@@ -1298,7 +1419,8 @@ def run_backtest(
                     reference_equity=high_water_equity,
                     observed_fraction=drawdown,
                     threshold=selected_config.max_drawdown_threshold,
-                    action="persist_disarm_and_force_liquidation",
+                    action=disarm_action,
+                    risk_epoch=risk_epoch,
                 )
             )
 
@@ -1344,6 +1466,7 @@ def run_backtest(
                         observed_fraction=rolling_loss,
                         threshold=selected_config.rolling_24h_loss_threshold,
                         action="hold_current_exposure",
+                        risk_epoch=risk_epoch,
                     )
                 )
             if trade is not None:
@@ -1380,6 +1503,7 @@ def run_backtest(
                             observed_fraction=drawdown,
                             threshold=selected_config.max_drawdown_threshold,
                             action=liquidation_action,
+                            risk_epoch=risk_epoch,
                         )
                     )
 
@@ -1481,6 +1605,11 @@ def run_backtest(
             high_water_equity=high_water_equity,
             drawdown_disarmed=drawdown_disarmed,
             rolling_loss_blocked_until=rolling_loss_blocked_until,
+            drawdown_policy_mode=selected_config.drawdown_policy_mode,
+            risk_epoch=risk_epoch,
+            drawdown_disarmed_at=drawdown_disarmed_at,
+            drawdown_rearm_eligible_at=drawdown_rearm_eligible_at,
+            last_drawdown_rearmed_at=last_drawdown_rearmed_at,
         ),
         metrics=_metrics(strategy_curve_tuple, trades_tuple),
         benchmark_metrics=_metrics(benchmark_curve, ()),

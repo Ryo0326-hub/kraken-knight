@@ -637,7 +637,7 @@ def test_wallet_accounts_return_public_identity_and_page_completeness() -> None:
             {
                 "accounts": [
                     {
-                        "account_id": "WX6V-JUKW-KKPB-QE36",
+                        "account_id": "WX6V JUKW KKPB QE36",
                         "flags": {"active": True, "user_defined": False},
                         "status": "active",
                         "type": "main",
@@ -659,6 +659,137 @@ def test_wallet_accounts_return_public_identity_and_page_completeness() -> None:
     assert "name" not in snapshot.accounts[0].__dataclass_fields__
     assert transport.requests[0].url.endswith("/0/private/ListWalletAccounts")
     assert PRIVATE_ENDPOINT_COSTS["ListWalletAccounts"] == 1
+
+
+@pytest.mark.parametrize(
+    "raw_account_id",
+    ["WX6V-JUKW-KKPB-QE36", "WX6V JUKW KKPB QE36"],
+)
+def test_wallet_account_id_accepts_documented_and_live_shapes_as_one_canonical_id(
+    raw_account_id: str,
+) -> None:
+    transport = QueueTransport(
+        _response(
+            {
+                "accounts": [
+                    {
+                        "account_id": raw_account_id,
+                        "flags": {"active": True, "user_defined": False},
+                        "status": "active",
+                        "type": "main",
+                        "name": None,
+                    }
+                ],
+                "cursor": {"next": None},
+            }
+        )
+    )
+
+    snapshot = _client(transport).get_wallet_accounts()
+
+    assert snapshot.accounts[0].account_id == "WX6V-JUKW-KKPB-QE36"
+
+
+@pytest.mark.parametrize(
+    "raw_account_id",
+    [
+        "wx6v-jukw-kkpb-qe36",
+        "WX6V-JUKW KKPB-QE36",
+        "WX6V  JUKW KKPB QE36",
+        "WX6V\tJUKW\tKKPB\tQE36",
+        " WX6V-JUKW-KKPB-QE36",
+        "WX6V-JUKW-KKPB-QE36 ",
+        "WX6V\u00a0JUKW\u00a0KKPB\u00a0QE36",
+        "WX6V-JUKW-KKPB-QE3_",
+        "WX6V-JUKW-KKPB-QE3\u00c9",
+        "not-a-wallet-id",
+        "",
+        None,
+    ],
+)
+def test_wallet_account_id_rejects_every_noncanonical_shape_without_reflection(
+    raw_account_id: object,
+) -> None:
+    response = _response(
+        {
+            "accounts": [
+                {
+                    "account_id": raw_account_id,
+                    "flags": {"active": True, "user_defined": False},
+                    "status": "active",
+                    "type": "main",
+                    "name": None,
+                }
+            ],
+            "cursor": {"next": None},
+        }
+    )
+
+    with pytest.raises(KrakenResponseError, match="wallet account ID is invalid") as caught:
+        _client(QueueTransport(response)).get_wallet_accounts()
+    rendered = str(raw_account_id)
+    if rendered:
+        assert rendered not in str(caught.value)
+
+
+def test_wallet_account_id_aliases_cannot_bypass_uniqueness() -> None:
+    response = _response(
+        {
+            "accounts": [
+                {
+                    "account_id": account_id,
+                    "flags": {"active": True, "user_defined": False},
+                    "status": "active",
+                    "type": "main",
+                    "name": None,
+                }
+                for account_id in ("WX6V-JUKW-KKPB-QE36", "WX6V JUKW KKPB QE36")
+            ],
+            "cursor": {"next": None},
+        }
+    )
+
+    with pytest.raises(KrakenResponseError, match="wallet account IDs are not unique"):
+        _client(QueueTransport(response)).get_wallet_accounts()
+
+
+def test_live_wallet_id_flows_to_ledger_query_in_canonical_form() -> None:
+    transport = QueueTransport(
+        _response(
+            {
+                "accounts": [
+                    {
+                        "account_id": "WX6V JUKW KKPB QE36",
+                        "flags": {"active": True, "user_defined": False},
+                        "status": "active",
+                        "type": "main",
+                        "name": None,
+                    }
+                ],
+                "cursor": {"next": None},
+            }
+        ),
+        _response({"ledger": {}, "count": 0}),
+    )
+    nonces = iter((300, 301))
+    client = _client(transport, nonce=lambda: next(nonces))
+
+    wallets = client.get_wallet_accounts()
+    canonical_id = wallets.accounts[0].account_id
+    client.get_ledgers(account_id=canonical_id)
+
+    ledger_request = transport.requests[1]
+    assert canonical_id == "WX6V-JUKW-KKPB-QE36"
+    assert parse_qs(urlparse(ledger_request.url).query) == {"account_id": [canonical_id]}
+    assert ledger_request.body is not None
+    assert canonical_id not in ledger_request.body.decode()
+    assert "WX6V JUKW KKPB QE36" not in ledger_request.body.decode()
+    assert dict(ledger_request.headers)["API-Sign"] == sign_read_only_request(
+        endpoint="Ledgers",
+        body=ledger_request.body,
+        nonce=301,
+        secret=API_SECRET_BYTES,
+    )
 
 
 def test_default_transport_rejects_any_non_pinned_origin_before_network() -> None:

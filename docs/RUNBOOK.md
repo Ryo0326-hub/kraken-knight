@@ -49,7 +49,9 @@ code 3 with `UNRESOLVED`.
 4. From the reviewed release, run `kraken-knight init --json`, followed by
    `kraken-knight account-id --json`. Independently review the returned public
    `wallet_account_id`, then pin it as
-   `KRAKEN_KNIGHT_EXPECTED_KRAKEN_ACCOUNT_ID`.
+   `KRAKEN_KNIGHT_EXPECTED_KRAKEN_ACCOUNT_ID`. The command emits the canonical
+   hyphenated ID even when Kraken's live response uses spaces between its four
+   groups.
 5. Review the restricted hint file and confirm it contains the five known
    submissions with five unique, authoritative Kraken order IDs. Run
    `kraken-knight legacy-manifest --json --legacy-hints /restricted/path/hints.json`

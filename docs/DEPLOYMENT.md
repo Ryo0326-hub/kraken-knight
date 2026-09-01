@@ -168,8 +168,9 @@ kraken-knight legacy-manifest --json \
   --legacy-hints /restricted/path/hints.json
 ```
 
-The operator independently reviews and pins the returned `wallet_account_id` as
-`KRAKEN_KNIGHT_EXPECTED_KRAKEN_ACCOUNT_ID`, and pins the reviewed
+The operator independently reviews and pins the returned canonical hyphenated
+`wallet_account_id` as `KRAKEN_KNIGHT_EXPECTED_KRAKEN_ACCOUNT_ID` (the adapter
+also accepts Kraken's live space-separated display form), and pins the reviewed
 `legacy_manifest_hash` as `KRAKEN_KNIGHT_EXPECTED_LEGACY_MANIFEST_HASH`. The
 restricted file must contain all five uncertain submissions with five unique
 Kraken order IDs. Leave `KRAKEN_KNIGHT_EXPECTED_FUNDING_MANIFEST_HASH` blank and

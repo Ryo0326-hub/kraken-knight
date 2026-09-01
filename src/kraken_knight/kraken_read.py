@@ -582,6 +582,23 @@ def _api_key_info_field_profile(row: Mapping[str, object]) -> Mapping[str, str]:
     return matches[0]
 
 
+def _canonical_wallet_account_id(value: object) -> str:
+    """Normalize Kraken's documented and live wallet-ID separators."""
+
+    if not isinstance(value, str):
+        raise KrakenResponseError("Kraken wallet account ID is invalid")
+    account_id = value
+    if len(account_id) != 19 or not account_id.isascii() or account_id != account_id.upper():
+        raise KrakenResponseError("Kraken wallet account ID is invalid")
+    separator = account_id[4]
+    if separator not in {"-", " "} or any(account_id[index] != separator for index in (9, 14)):
+        raise KrakenResponseError("Kraken wallet account ID is invalid")
+    groups = account_id.split(separator)
+    if len(groups) != 4 or any(len(group) != 4 or not group.isalnum() for group in groups):
+        raise KrakenResponseError("Kraken wallet account ID is invalid")
+    return "-".join(groups)
+
+
 def _decimal(value: object, *, field: str, nonnegative: bool = False) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise KrakenResponseError(f"Kraken response field {field!r} is not a decimal")
@@ -1425,14 +1442,7 @@ class KrakenReadClient:
         for index, value in enumerate(_sequence(result.get("accounts"), field="accounts")):
             row = _mapping(value, field=f"accounts[{index}]")
             flags = _mapping(row.get("flags"), field=f"accounts[{index}].flags")
-            account_id = _string(row.get("account_id"), field="account_id")
-            if (
-                len(account_id) > 64
-                or not account_id.isascii()
-                or not account_id.isprintable()
-                or account_id.isspace()
-            ):
-                raise KrakenResponseError("Kraken wallet account ID is invalid")
+            account_id = _canonical_wallet_account_id(row.get("account_id"))
             accounts.append(
                 WalletAccount(
                     account_id=account_id,

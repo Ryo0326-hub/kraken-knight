@@ -48,6 +48,45 @@ PRIVATE_ENDPOINT_COSTS: Mapping[str, int] = MappingProxyType(
         "TradeVolume": 1,
     }
 )
+_API_KEY_INFO_CAMEL_FIELDS: Mapping[str, str] = MappingProxyType(
+    {
+        "api_key": "apiKey",
+        "api_key_name": "apiKeyName",
+        "created_time": "createdTime",
+        "iban": "iban",
+        "ip_allowlist": "ipAllowlist",
+        "last_used": "lastUsed",
+        "modified_time": "modifiedTime",
+        "nonce": "nonce",
+        "nonce_window": "nonceWindow",
+        "permissions": "permissions",
+        "query_from": "queryFrom",
+        "query_to": "queryTo",
+        "valid_until": "validUntil",
+    }
+)
+_API_KEY_INFO_SNAKE_FIELDS: Mapping[str, str] = MappingProxyType(
+    {
+        "api_key": "api_key",
+        "api_key_name": "api_key_name",
+        "created_time": "created_time",
+        "iban": "iban",
+        "ip_allowlist": "ip_allowlist",
+        "last_used": "last_used",
+        "modified_time": "modified_time",
+        "nonce": "nonce",
+        "nonce_window": "nonce_window",
+        "permissions": "permissions",
+        "query_from": "query_from",
+        "query_to": "query_to",
+        "valid_until": "valid_until",
+    }
+)
+_API_KEY_INFO_FIELD_PROFILES = (
+    _API_KEY_INFO_CAMEL_FIELDS,
+    _API_KEY_INFO_SNAKE_FIELDS,
+)
+_API_KEY_INFO_SCHEMA_ERROR = "Kraken GetApiKeyInfo response schema is unsupported"
 
 type JsonMapping = Mapping[str, Any]
 type PrivateEndpoint = Literal[
@@ -513,6 +552,34 @@ def _optional_string(value: object, *, field: str) -> str | None:
     if value is None or value == "None":
         return None
     return _string(value, field=field, allow_empty=True)
+
+
+def _api_key_identifier(value: object) -> str:
+    """Validate an echoed public key without reflecting it into an error."""
+
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 512
+        or not value.isascii()
+        or not all(0x21 <= ord(character) <= 0x7E for character in value)
+    ):
+        raise KrakenResponseError("Kraken response API-key identifier is invalid")
+    return value
+
+
+def _api_key_info_field_profile(row: Mapping[str, object]) -> Mapping[str, str]:
+    """Select one complete, unambiguous Kraken API-key metadata schema."""
+
+    observed_fields = frozenset(row)
+    matches = tuple(
+        profile
+        for profile in _API_KEY_INFO_FIELD_PROFILES
+        if observed_fields == frozenset(profile.values())
+    )
+    if len(matches) != 1:
+        raise KrakenResponseError(_API_KEY_INFO_SCHEMA_ERROR)
+    return matches[0]
 
 
 def _decimal(value: object, *, field: str, nonnegative: bool = False) -> Decimal:
@@ -1286,33 +1353,69 @@ class KrakenReadClient:
 
     def get_api_key_info(self) -> ApiKeyInfoSnapshot:
         result, observed_at = self._private_post("GetApiKeyInfo", {})
+        fields = _api_key_info_field_profile(result)
         # Kraken returns the public API key in this payload. Validate its shape,
         # then intentionally discard it so it cannot enter a model or repr.
-        _string(result.get("apiKey"), field="apiKey")
-        _string(result.get("iban"), field="iban", allow_empty=True)
+        returned_key = _api_key_identifier(result[fields["api_key"]])
+        if self._api_key is None or not hmac.compare_digest(returned_key, self._api_key):
+            raise KrakenResponseError("Kraken API-key identity does not match the request")
+        _string(result[fields["iban"]], field="iban", allow_empty=True)
         permissions = tuple(
             _string(item, field="permissions item")
-            for item in _sequence(result.get("permissions"), field="permissions")
+            for item in _sequence(result[fields["permissions"]], field="permissions")
         )
         ip_allowlist = tuple(
             _string(item, field="ipAllowlist item")
-            for item in _sequence(result.get("ipAllowlist"), field="ipAllowlist")
+            for item in _sequence(result[fields["ip_allowlist"]], field="ipAllowlist")
         )
-        last_used = _optional_timestamp(result.get("lastUsed"), field="lastUsed")
+        last_used = _optional_timestamp(
+            result[fields["last_used"]],
+            field="lastUsed",
+        )
         return ApiKeyInfoSnapshot(
-            key_name=_string(result.get("apiKeyName"), field="apiKeyName"),
+            key_name=_string(
+                result[fields["api_key_name"]],
+                field="apiKeyName",
+            ),
             permissions=permissions,
-            exchange_nonce=_integer(result.get("nonce"), field="nonce", nonnegative=True),
-            nonce_window=_integer(result.get("nonceWindow"), field="nonceWindow", nonnegative=True),
+            exchange_nonce=_integer(
+                result[fields["nonce"]],
+                field="nonce",
+                nonnegative=True,
+            ),
+            nonce_window=_integer(
+                result[fields["nonce_window"]],
+                field="nonceWindow",
+                nonnegative=True,
+            ),
             ip_allowlist=ip_allowlist,
-            created_at=cast(datetime, _timestamp(result.get("createdTime"), field="createdTime")),
+            created_at=cast(
+                datetime,
+                _timestamp(
+                    result[fields["created_time"]],
+                    field="createdTime",
+                ),
+            ),
             modified_at=cast(
-                datetime, _timestamp(result.get("modifiedTime"), field="modifiedTime")
+                datetime,
+                _timestamp(
+                    result[fields["modified_time"]],
+                    field="modifiedTime",
+                ),
             ),
             last_used_at=last_used,
-            valid_until=_optional_timestamp(result.get("validUntil"), field="validUntil"),
-            query_from=_optional_timestamp(result.get("queryFrom"), field="queryFrom"),
-            query_to=_optional_timestamp(result.get("queryTo"), field="queryTo"),
+            valid_until=_optional_timestamp(
+                result[fields["valid_until"]],
+                field="validUntil",
+            ),
+            query_from=_optional_timestamp(
+                result[fields["query_from"]],
+                field="queryFrom",
+            ),
+            query_to=_optional_timestamp(
+                result[fields["query_to"]],
+                field="queryTo",
+            ),
             observed_at=observed_at,
         )
 

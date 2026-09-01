@@ -94,6 +94,46 @@ def _pair_result() -> dict[str, object]:
     }
 
 
+def _api_key_info_result(*, raw_key: str, snake_case: bool = False) -> dict[str, object]:
+    common: dict[str, object] = {
+        "iban": "AA88 REDACTED FIXTURE",
+        "nonce": "1772627060997",
+        "permissions": [
+            "query-closed-trades",
+            "query-funds",
+            "query-ledger",
+            "query-open-trades",
+        ],
+    }
+    if snake_case:
+        return {
+            **common,
+            "api_key_name": "kraken-knight-readonly-2026-08",
+            "api_key": raw_key,
+            "nonce_window": "0",
+            "created_time": "1772542900",
+            "modified_time": "1772543095",
+            "valid_until": "0",
+            "query_from": "0",
+            "query_to": "0",
+            "ip_allowlist": ["203.0.113.9/32"],
+            "last_used": "1772627061",
+        }
+    return {
+        **common,
+        "apiKeyName": "kraken-knight-read",
+        "apiKey": raw_key,
+        "nonceWindow": 0,
+        "createdTime": "1772542900",
+        "modifiedTime": "1772543095",
+        "validUntil": "0",
+        "queryFrom": "0",
+        "queryTo": "1773000000",
+        "ipAllowlist": ["203.0.113.9/32"],
+        "lastUsed": "1772627061",
+    }
+
+
 def _order(*, status: str = "open", closed: bool = False) -> dict[str, object]:
     result: dict[str, object] = {
         "refid": None,
@@ -400,27 +440,9 @@ def test_fractional_timestamp_beyond_microseconds_fails_closed() -> None:
 
 def test_api_key_info_discards_raw_key_from_model_repr_and_error() -> None:
     returned_raw_key = "returned-raw-key-must-not-survive"
-    transport = QueueTransport(
-        _response(
-            {
-                "apiKeyName": "kraken-knight-read",
-                "apiKey": returned_raw_key,
-                "iban": "AA88 REDACTED FIXTURE",
-                "nonce": "1772627060997",
-                "nonceWindow": 0,
-                "permissions": ["query-funds", "query-open-trades", "query-closed-trades"],
-                "createdTime": "1772542900",
-                "modifiedTime": "1772543095",
-                "validUntil": "0",
-                "queryFrom": "0",
-                "queryTo": "1773000000",
-                "ipAllowlist": ["203.0.113.9/32"],
-                "lastUsed": "1772627061",
-            }
-        )
-    )
+    transport = QueueTransport(_response(_api_key_info_result(raw_key=returned_raw_key)))
 
-    snapshot = _client(transport).get_api_key_info()
+    snapshot = _client(transport, api_key=returned_raw_key).get_api_key_info()
 
     assert isinstance(snapshot, ApiKeyInfoSnapshot)
     assert snapshot.key_name == "kraken-knight-read"
@@ -435,18 +457,178 @@ def test_api_key_info_discards_raw_key_from_model_repr_and_error() -> None:
     assert "iban" not in snapshot.__dataclass_fields__
     assert returned_raw_key not in repr(_client(transport))
 
-    malformed = QueueTransport(
-        _response(
-            {
-                "apiKeyName": "name",
-                "apiKey": {"secret": returned_raw_key},
-                "iban": "also-private",
-            }
-        )
+
+def test_api_key_info_accepts_live_snake_case_without_weakening_attestation() -> None:
+    returned_raw_key = "live-shape-public-key"
+    transport = QueueTransport(
+        _response(_api_key_info_result(raw_key=returned_raw_key, snake_case=True))
     )
-    with pytest.raises(KrakenResponseError) as caught:
-        _client(malformed).get_api_key_info()
+
+    snapshot = _client(transport, api_key=returned_raw_key).get_api_key_info()
+
+    assert snapshot.key_name == "kraken-knight-readonly-2026-08"
+    assert snapshot.permissions == (
+        "query-closed-trades",
+        "query-funds",
+        "query-ledger",
+        "query-open-trades",
+    )
+    assert snapshot.ip_allowlist == ("203.0.113.9/32",)
+    assert snapshot.nonce_window == 0
+    assert snapshot.valid_until is None
+    assert snapshot.query_from is None
+    assert snapshot.query_to is None
+    assert returned_raw_key not in repr(snapshot)
+
+
+@pytest.mark.parametrize(
+    ("snake_case", "key_field"),
+    [(False, "apiKey"), (True, "api_key")],
+)
+def test_api_key_info_malformed_key_value_is_rejected_without_leaking(
+    snake_case: bool,
+    key_field: str,
+) -> None:
+    configured_key = f"malformed-value-key-{key_field}"
+    secret_sentinel = f"nested-secret-sentinel-{key_field}"
+    result = _api_key_info_result(raw_key=configured_key, snake_case=snake_case)
+    result[key_field] = {"secret": secret_sentinel}
+
+    with pytest.raises(KrakenResponseError, match="API-key identifier is invalid") as caught:
+        _client(
+            QueueTransport(_response(result)),
+            api_key=configured_key,
+        ).get_api_key_info()
+    assert secret_sentinel not in str(caught.value)
+    assert secret_sentinel not in repr(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("snake_case", "key_field"),
+    [(False, "apiKey"), (True, "api_key")],
+)
+def test_api_key_info_non_ascii_key_is_rejected_as_safe_adapter_error(
+    snake_case: bool,
+    key_field: str,
+) -> None:
+    configured_key = f"non-ascii-response-key-{key_field}"
+    non_ascii_sentinel = "non-ascii-\u00e9-key"
+    result = _api_key_info_result(raw_key=configured_key, snake_case=snake_case)
+    result[key_field] = non_ascii_sentinel
+
+    with pytest.raises(KrakenResponseError, match="API-key identifier is invalid") as caught:
+        _client(
+            QueueTransport(_response(result)),
+            api_key=configured_key,
+        ).get_api_key_info()
+    assert non_ascii_sentinel not in str(caught.value)
+    assert non_ascii_sentinel not in repr(caught.value)
+
+
+def test_api_key_info_camel_and_snake_profiles_map_to_equal_snapshots() -> None:
+    camel_key = "equivalent-camel-key"
+    snake_key = "equivalent-snake-key"
+    camel_result = _api_key_info_result(raw_key=camel_key)
+    aliases = {
+        "apiKey": "api_key",
+        "apiKeyName": "api_key_name",
+        "createdTime": "created_time",
+        "ipAllowlist": "ip_allowlist",
+        "lastUsed": "last_used",
+        "modifiedTime": "modified_time",
+        "nonceWindow": "nonce_window",
+        "queryFrom": "query_from",
+        "queryTo": "query_to",
+        "validUntil": "valid_until",
+    }
+    snake_result = {aliases.get(field, field): value for field, value in camel_result.items()}
+    snake_result["api_key"] = snake_key
+
+    camel_snapshot = _client(
+        QueueTransport(_response(camel_result)),
+        api_key=camel_key,
+    ).get_api_key_info()
+    snake_snapshot = _client(
+        QueueTransport(_response(snake_result)),
+        api_key=snake_key,
+    ).get_api_key_info()
+
+    assert snake_snapshot == camel_snapshot
+
+
+def test_api_key_info_rejects_ambiguous_aliases_and_key_identity_mismatch() -> None:
+    returned_raw_key = "returned-key"
+    base = _api_key_info_result(raw_key=returned_raw_key)
+    ambiguous = QueueTransport(_response({**base, "api_key": returned_raw_key}))
+
+    with pytest.raises(KrakenResponseError, match="schema is unsupported"):
+        _client(ambiguous, api_key=returned_raw_key).get_api_key_info()
+
+    mismatched = QueueTransport(_response(base))
+    with pytest.raises(KrakenResponseError, match="identity does not match") as caught:
+        _client(mismatched, api_key="configured-different-key").get_api_key_info()
     assert returned_raw_key not in repr(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("documented", "observed"),
+    [
+        ("apiKey", "api_key"),
+        ("apiKeyName", "api_key_name"),
+        ("nonceWindow", "nonce_window"),
+        ("ipAllowlist", "ip_allowlist"),
+        ("createdTime", "created_time"),
+        ("modifiedTime", "modified_time"),
+        ("lastUsed", "last_used"),
+        ("validUntil", "valid_until"),
+        ("queryFrom", "query_from"),
+        ("queryTo", "query_to"),
+    ],
+)
+def test_api_key_info_rejects_every_dual_alias(documented: str, observed: str) -> None:
+    returned_raw_key = f"dual-alias-key-{documented}"
+    result = _api_key_info_result(raw_key=returned_raw_key)
+    result[observed] = result[documented]
+
+    with pytest.raises(KrakenResponseError, match="schema is unsupported"):
+        _client(
+            QueueTransport(_response(result)),
+            api_key=returned_raw_key,
+        ).get_api_key_info()
+
+
+@pytest.mark.parametrize(
+    "missing",
+    sorted(_api_key_info_result(raw_key="fixture-key")),
+)
+def test_api_key_info_rejects_every_missing_field(missing: str) -> None:
+    fixture_key = f"fixture-key-{missing}"
+    result = _api_key_info_result(raw_key=fixture_key)
+    del result[missing]
+
+    with pytest.raises(KrakenResponseError, match="schema is unsupported"):
+        _client(
+            QueueTransport(_response(result)),
+            api_key=fixture_key,
+        ).get_api_key_info()
+
+
+def test_api_key_info_rejects_mixed_or_extended_profiles_without_leaking() -> None:
+    injected = "unknown-field-secret"
+    mixed_key = "profile-mixed-returned-key"
+    mixed = _api_key_info_result(raw_key=mixed_key)
+    mixed["api_key_name"] = mixed.pop("apiKeyName")
+    extended_key = "profile-extended-returned-key"
+    extended = {**_api_key_info_result(raw_key=extended_key), "future": injected}
+
+    for api_key, result in ((mixed_key, mixed), (extended_key, extended)):
+        with pytest.raises(KrakenResponseError, match="schema is unsupported") as caught:
+            _client(
+                QueueTransport(_response(result)),
+                api_key=api_key,
+            ).get_api_key_info()
+        assert api_key not in repr(caught.value)
+        assert injected not in repr(caught.value)
 
 
 def test_wallet_accounts_return_public_identity_and_page_completeness() -> None:

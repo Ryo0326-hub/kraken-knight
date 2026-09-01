@@ -9,7 +9,7 @@ import statistics
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_FLOOR, Decimal, localcontext
 from enum import StrEnum
 from itertools import pairwise
 
@@ -32,11 +32,15 @@ class ExecutionOutcome(StrEnum):
     SELL = "sell"
     WITHIN_BAND = "within_band"
     ZERO_QUANTITY = "zero_quantity"
+    BELOW_EXCHANGE_MINIMUM = "below_exchange_minimum"
     NO_ACTION_DATA_INVALID = "no_action_data_invalid"
     NO_ACTION_STALE_SIGNAL = "no_action_stale_signal"
     NO_ACTION_RISK_GATE = "no_action_risk_gate"
     NO_ACTION_DISARMED = "no_action_disarmed"
+    NO_FILL_REFERENCE_UNAVAILABLE = "no_fill_reference_unavailable"
     FORCED_LIQUIDATION = "forced_liquidation"
+    FORCED_LIQUIDATION_PARTIAL = "forced_liquidation_partial"
+    FORCED_LIQUIDATION_PARTIAL_VOLUME_CAPPED = "forced_liquidation_partial_volume_capped"
 
 
 class RiskEventType(StrEnum):
@@ -77,9 +81,91 @@ class ExecutionCosts:
 
 
 @dataclass(frozen=True, slots=True)
+class InstrumentRules:
+    """Observed Kraken increments and minimums applied to simulated orders.
+
+    These rules are deliberately optional on :class:`BacktestConfig` so the
+    legacy replay remains byte-for-byte compatible.  A historical study binds
+    an explicit, timestamped exchange snapshot in its pre-registration.
+    """
+
+    price_tick_cad: Decimal
+    quantity_increment_btc: Decimal
+    minimum_quantity_btc: Decimal
+    minimum_cost_cad: Decimal
+
+    def __post_init__(self) -> None:
+        for name in (
+            "price_tick_cad",
+            "quantity_increment_btc",
+            "minimum_quantity_btc",
+            "minimum_cost_cad",
+        ):
+            value = to_decimal(getattr(self, name), field=name)
+            object.__setattr__(self, name, value)
+            if value <= 0:
+                raise ValueError(f"{name} must be greater than zero")
+        if self.minimum_quantity_btc < self.quantity_increment_btc:
+            raise ValueError("minimum_quantity_btc cannot be smaller than its increment")
+
+
+PRECISE_EXECUTION_WINDOW = timedelta(minutes=5)
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionReference:
+    """Observed post-decision price evidence for one historical fill window.
+
+    ``execution_time`` is when the selected one-minute VWAP becomes complete,
+    not the opening timestamp of that minute.  It must be after the decision
+    and no later than the end of the frozen five-minute selection window.
+    Positive volume and trade count prove that the reference is not an invented
+    zero-volume candle.
+    """
+
+    decision_time: datetime
+    execution_time: datetime
+    reference_price: Decimal
+    volume_btc: Decimal
+    trade_count: int
+
+    def __post_init__(self) -> None:
+        for name in ("decision_time", "execution_time"):
+            value = getattr(self, name)
+            if not isinstance(value, datetime):
+                raise TypeError(f"{name} must be a datetime")
+            if value.tzinfo is None or value.utcoffset() != timedelta(0):
+                raise ValueError(f"{name} must be timezone-aware UTC")
+            if value.second != 0 or value.microsecond != 0:
+                raise ValueError(f"{name} must be aligned to a UTC minute")
+
+        if self.execution_time < self.decision_time:
+            raise ValueError("execution_time cannot precede decision_time")
+        if self.execution_time > self.decision_time + PRECISE_EXECUTION_WINDOW:
+            raise ValueError("execution_time must be no later than the five-minute window end")
+
+        reference_price = to_decimal(self.reference_price, field="reference_price")
+        volume_btc = to_decimal(self.volume_btc, field="volume_btc")
+        object.__setattr__(self, "reference_price", reference_price)
+        object.__setattr__(self, "volume_btc", volume_btc)
+        if reference_price <= 0:
+            raise ValueError("reference_price must be greater than zero")
+        if volume_btc <= 0:
+            raise ValueError("volume_btc must be greater than zero")
+        if (
+            isinstance(self.trade_count, bool)
+            or not isinstance(self.trade_count, int)
+            or self.trade_count <= 0
+        ):
+            raise ValueError("trade_count must be a positive integer")
+
+
+@dataclass(frozen=True, slots=True)
 class BacktestConfig:
     initial_cash: Decimal = Decimal("1000")
     costs: ExecutionCosts = ExecutionCosts()
+    instrument_rules: InstrumentRules | None = None
+    max_execution_volume_fraction: Decimal | None = None
     cash_reserve_cad: Decimal = Decimal("200")
     absolute_btc_cap_cad: Decimal = Decimal("800")
     max_post_cost_exposure: Decimal = Decimal("0.80")
@@ -145,6 +231,18 @@ class BacktestConfig:
             raise ValueError("decision delay must precede the scheduled execution open")
         if not isinstance(self.costs, ExecutionCosts):
             raise TypeError("costs must be an ExecutionCosts instance")
+        if self.instrument_rules is not None and not isinstance(
+            self.instrument_rules, InstrumentRules
+        ):
+            raise TypeError("instrument_rules must be an InstrumentRules instance")
+        if self.max_execution_volume_fraction is not None:
+            participation = to_decimal(
+                self.max_execution_volume_fraction,
+                field="max_execution_volume_fraction",
+            )
+            object.__setattr__(self, "max_execution_volume_fraction", participation)
+            if participation <= 0 or participation > 1:
+                raise ValueError("max_execution_volume_fraction must be in (0, 1]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,10 +263,26 @@ class Trade:
     pre_trade_equity: Decimal
     cash_after: Decimal
     btc_after: Decimal
+    execution_volume_btc: Decimal | None = None
+    volume_participation_fraction: Decimal | None = None
+    volume_cap_applied: bool = False
 
     def __post_init__(self) -> None:
         if self.execution_time < self.decision_time:
             raise ValueError("execution_time cannot precede decision_time")
+        if not isinstance(self.volume_cap_applied, bool):
+            raise TypeError("volume_cap_applied must be a bool")
+        if self.volume_cap_applied and self.execution_volume_btc is None:
+            raise ValueError("a volume cap cannot be applied without execution volume")
+        if self.execution_volume_btc is not None:
+            if self.execution_volume_btc <= 0:
+                raise ValueError("execution_volume_btc must be positive when supplied")
+            if self.volume_participation_fraction is None:
+                raise ValueError("volume participation is required with execution volume")
+        if self.volume_participation_fraction is not None and (
+            self.volume_participation_fraction <= 0 or self.volume_participation_fraction > 1
+        ):
+            raise ValueError("volume_participation_fraction must be in (0, 1]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,10 +303,16 @@ class RebalanceDecision:
     rebalance_band_cad: Decimal
     outcome: ExecutionOutcome
     trade_id: str | None
+    remaining_btc: Decimal | None = None
 
     def __post_init__(self) -> None:
         if self.execution_time < self.decision_time:
             raise ValueError("execution_time cannot precede decision_time")
+        if self.remaining_btc is not None:
+            remaining_btc = to_decimal(self.remaining_btc, field="remaining_btc")
+            object.__setattr__(self, "remaining_btc", remaining_btc)
+            if remaining_btc < 0:
+                raise ValueError("remaining_btc cannot be negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,6 +325,7 @@ class EquityPoint:
     btc_mark_value_cad: Decimal
     estimated_liquidation_fee_cad: Decimal
     cumulative_fees: Decimal
+    estimated_liquidation_slippage_cad: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,6 +422,7 @@ class _PortfolioSnapshot:
     btc_mark_value: Decimal
     btc_liquidation_value: Decimal
     estimated_liquidation_fee: Decimal
+    estimated_liquidation_slippage: Decimal
 
 
 def _portfolio_snapshot(
@@ -309,40 +431,91 @@ def _portfolio_snapshot(
     btc: Decimal,
     reference_price: Decimal,
     costs: ExecutionCosts,
+    instrument_rules: InstrumentRules | None = None,
 ) -> _PortfolioSnapshot:
     btc_mark_value = btc * reference_price
-    estimated_liquidation_fee = btc_mark_value * costs.taker_fee_rate
-    btc_liquidation_value = btc_mark_value - estimated_liquidation_fee
+    # A terminal mark represents the proceeds available from selling BTC, so
+    # it uses exactly the same conservative execution convention as an order.
+    liquidation_price = _execution_price(
+        reference_price=reference_price,
+        side=TradeSide.SELL,
+        costs=costs,
+        instrument_rules=instrument_rules,
+    )
+    if btc > 0 and liquidation_price <= 0:
+        raise RuntimeError("rounded liquidation price must remain positive")
+    liquidation_notional = btc * liquidation_price
+    estimated_liquidation_slippage = btc_mark_value - liquidation_notional
+    estimated_liquidation_fee = liquidation_notional * costs.fee_rate_for(TradeSide.SELL)
+    btc_liquidation_value = liquidation_notional - estimated_liquidation_fee
     return _PortfolioSnapshot(
         equity=cash + btc_liquidation_value,
         btc_mark_value=btc_mark_value,
         btc_liquidation_value=btc_liquidation_value,
         estimated_liquidation_fee=estimated_liquidation_fee,
+        estimated_liquidation_slippage=estimated_liquidation_slippage,
     )
+
+
+def _round_to_increment(value: Decimal, increment: Decimal, *, rounding: str) -> Decimal:
+    """Round a positive amount to an arbitrary exchange increment."""
+
+    with localcontext() as context:
+        context.prec = max(50, len(value.as_tuple().digits) + len(increment.as_tuple().digits) + 8)
+        units = (value / increment).to_integral_value(rounding=rounding)
+        return units * increment
+
+
+def _execution_price(
+    *,
+    reference_price: Decimal,
+    side: TradeSide,
+    costs: ExecutionCosts,
+    instrument_rules: InstrumentRules | None,
+) -> Decimal:
+    """Apply frozen slippage and conservative exchange tick rounding."""
+
+    slippage_multiplier = (
+        Decimal("1") + costs.slippage_rate
+        if side is TradeSide.BUY
+        else Decimal("1") - costs.slippage_rate
+    )
+    execution_price = reference_price * slippage_multiplier
+    if instrument_rules is not None:
+        price_rounding = ROUND_CEILING if side is TradeSide.BUY else ROUND_FLOOR
+        execution_price = _round_to_increment(
+            execution_price,
+            instrument_rules.price_tick_cad,
+            rounding=price_rounding,
+        )
+    return execution_price
 
 
 def _execute_rebalance(
     *,
     signal: StrategyDecision,
-    candle: Candle,
     decision_time: datetime,
+    execution_time: datetime,
+    reference_price: Decimal,
+    execution_volume_btc: Decimal | None,
+    required_signal_close_time: datetime,
     cash: Decimal,
     btc: Decimal,
     config: BacktestConfig,
     exposure_increase_blocked: bool,
     drawdown_disarmed: bool,
 ) -> tuple[Decimal, Decimal, RebalanceDecision, Trade | None]:
-    reference_price = candle.open
     snapshot = _portfolio_snapshot(
         cash=cash,
         btc=btc,
         reference_price=reference_price,
         costs=config.costs,
+        instrument_rules=config.instrument_rules,
     )
     pre_trade_equity = snapshot.equity
     if pre_trade_equity <= 0:
         raise RuntimeError("portfolio equity must remain positive")
-    if candle.open_time < decision_time:
+    if execution_time < decision_time:
         raise RuntimeError("execution cannot precede the recorded decision time")
     if signal.signal_close_time is not None:
         expected_decision_time = signal.signal_close_time + timedelta(
@@ -363,18 +536,14 @@ def _execute_rebalance(
     no_action_outcome: ExecutionOutcome | None = None
     if not signal.usable_data:
         no_action_outcome = ExecutionOutcome.NO_ACTION_DATA_INVALID
-    elif (
-        signal.signal_close_time is None
-        or signal.signal_close_time + timedelta(days=config.daily_execution_lag_days)
-        != candle.open_time
-    ):
+    elif signal.signal_close_time is None or signal.signal_close_time != required_signal_close_time:
         no_action_outcome = ExecutionOutcome.NO_ACTION_STALE_SIGNAL
     if no_action_outcome is not None and not drawdown_disarmed:
         current_weight = current_btc_value / pre_trade_equity
         intent_id = _intent_id(
             signal,
             decision_time,
-            candle.open_time,
+            execution_time,
             current_weight,
             pre_trade_equity,
             Decimal("0"),
@@ -384,7 +553,7 @@ def _execute_rebalance(
             strategy_decision_id=signal.decision_id,
             signal_time=signal.signal_close_time,
             decision_time=decision_time,
-            execution_time=candle.open_time,
+            execution_time=execution_time,
             strategy_reason=signal.reason.value,
             target_weight=current_weight,
             pre_trade_equity=pre_trade_equity,
@@ -397,7 +566,12 @@ def _execute_rebalance(
         )
         return cash, btc, decision, None
 
-    post_cost_price = reference_price * (Decimal("1") - config.costs.taker_fee_rate)
+    post_cost_price = _execution_price(
+        reference_price=reference_price,
+        side=TradeSide.SELL,
+        costs=config.costs,
+        instrument_rules=config.instrument_rules,
+    ) * (Decimal("1") - config.costs.fee_rate_for(TradeSide.SELL))
     if post_cost_price <= 0:
         raise RuntimeError("liquidation value must remain positive")
 
@@ -409,10 +583,11 @@ def _execute_rebalance(
 
     side_for_cap = TradeSide.BUY if desired_btc > btc else TradeSide.SELL
     cap_fee_rate = config.costs.fee_rate_for(side_for_cap)
-    cap_execution_price = reference_price * (
-        Decimal("1") + config.costs.slippage_rate
-        if side_for_cap is TradeSide.BUY
-        else Decimal("1") - config.costs.slippage_rate
+    cap_execution_price = _execution_price(
+        reference_price=reference_price,
+        side=side_for_cap,
+        costs=config.costs,
+        instrument_rules=config.instrument_rules,
     )
     cash_per_btc = cap_execution_price * (
         Decimal("1") + cap_fee_rate
@@ -431,12 +606,7 @@ def _execute_rebalance(
         desired_btc = Decimal("0")
 
     if cash < config.cash_reserve_cad and btc > 0:
-        sell_fee_rate = config.costs.fee_rate_for(TradeSide.SELL)
-        net_sell_cash_per_btc = (
-            reference_price
-            * (Decimal("1") - config.costs.slippage_rate)
-            * (Decimal("1") - sell_fee_rate)
-        )
+        net_sell_cash_per_btc = post_cost_price
         reserve_shortfall = config.cash_reserve_cad - cash
         maximum_remaining_btc = max(
             Decimal("0"),
@@ -459,7 +629,7 @@ def _execute_rebalance(
     intent_id = _intent_id(
         signal,
         decision_time,
-        candle.open_time,
+        execution_time,
         effective_target_weight,
         pre_trade_equity,
         requested_delta,
@@ -471,7 +641,7 @@ def _execute_rebalance(
             strategy_decision_id=signal.decision_id,
             signal_time=signal.signal_close_time,
             decision_time=decision_time,
-            execution_time=candle.open_time,
+            execution_time=execution_time,
             strategy_reason=signal.reason.value,
             target_weight=effective_target_weight,
             pre_trade_equity=pre_trade_equity,
@@ -490,7 +660,7 @@ def _execute_rebalance(
             strategy_decision_id=signal.decision_id,
             signal_time=signal.signal_close_time,
             decision_time=decision_time,
-            execution_time=candle.open_time,
+            execution_time=execution_time,
             strategy_reason=signal.reason.value,
             target_weight=Decimal("0"),
             pre_trade_equity=pre_trade_equity,
@@ -519,7 +689,7 @@ def _execute_rebalance(
             strategy_decision_id=signal.decision_id,
             signal_time=signal.signal_close_time,
             decision_time=decision_time,
-            execution_time=candle.open_time,
+            execution_time=execution_time,
             strategy_reason=signal.reason.value,
             target_weight=effective_target_weight,
             pre_trade_equity=pre_trade_equity,
@@ -539,7 +709,7 @@ def _execute_rebalance(
             strategy_decision_id=signal.decision_id,
             signal_time=signal.signal_close_time,
             decision_time=decision_time,
-            execution_time=candle.open_time,
+            execution_time=execution_time,
             strategy_reason=signal.reason.value,
             target_weight=effective_target_weight,
             pre_trade_equity=pre_trade_equity,
@@ -555,12 +725,14 @@ def _execute_rebalance(
     side = TradeSide.BUY if signed_quantity > 0 else TradeSide.SELL
     liquidity = config.costs.liquidity_for(side)
     fee_rate = config.costs.fee_rate_for(side)
-    slippage_multiplier = (
-        Decimal("1") + config.costs.slippage_rate
-        if side is TradeSide.BUY
-        else Decimal("1") - config.costs.slippage_rate
+    execution_price = _execution_price(
+        reference_price=reference_price,
+        side=side,
+        costs=config.costs,
+        instrument_rules=config.instrument_rules,
     )
-    execution_price = reference_price * slippage_multiplier
+    if execution_price <= 0:
+        raise RuntimeError("rounded execution price must remain positive")
     quantity = abs(signed_quantity)
 
     if side is TradeSide.BUY:
@@ -570,13 +742,27 @@ def _execute_rebalance(
     else:
         quantity = min(quantity, btc)
 
+    volume_cap_applied = False
+    if execution_volume_btc is not None:
+        participation_cap = config.max_execution_volume_fraction or Decimal("1")
+        maximum_participating_quantity = execution_volume_btc * participation_cap
+        volume_cap_applied = quantity > maximum_participating_quantity
+        quantity = min(quantity, maximum_participating_quantity)
+
+    if config.instrument_rules is not None:
+        quantity = _round_to_increment(
+            quantity,
+            config.instrument_rules.quantity_increment_btc,
+            rounding=ROUND_DOWN,
+        )
+
     if quantity <= 0:
         decision = RebalanceDecision(
             intent_id=intent_id,
             strategy_decision_id=signal.decision_id,
             signal_time=signal.signal_close_time,
             decision_time=decision_time,
-            execution_time=candle.open_time,
+            execution_time=execution_time,
             strategy_reason=signal.reason.value,
             target_weight=effective_target_weight,
             pre_trade_equity=pre_trade_equity,
@@ -590,6 +776,27 @@ def _execute_rebalance(
         return cash, btc, decision, None
 
     gross_notional = quantity * execution_price
+    if config.instrument_rules is not None and (
+        quantity < config.instrument_rules.minimum_quantity_btc
+        or gross_notional < config.instrument_rules.minimum_cost_cad
+    ):
+        decision = RebalanceDecision(
+            intent_id=intent_id,
+            strategy_decision_id=signal.decision_id,
+            signal_time=signal.signal_close_time,
+            decision_time=decision_time,
+            execution_time=execution_time,
+            strategy_reason=signal.reason.value,
+            target_weight=effective_target_weight,
+            pre_trade_equity=pre_trade_equity,
+            current_btc_value=current_btc_value,
+            estimated_liquidation_fee_cad=snapshot.estimated_liquidation_fee,
+            requested_delta_cad=requested_delta,
+            rebalance_band_cad=band,
+            outcome=ExecutionOutcome.BELOW_EXCHANGE_MINIMUM,
+            trade_id=None,
+        )
+        return cash, btc, decision, None
     fee = gross_notional * fee_rate
     slippage = quantity * abs(execution_price - reference_price)
     if side is TradeSide.BUY:
@@ -603,7 +810,7 @@ def _execute_rebalance(
     # after an affordability cap.  Holdings are never allowed below zero.
     if new_cash < 0 and abs(new_cash) < Decimal("1e-20"):
         new_cash = Decimal("0")
-    if new_btc < 0 and abs(new_btc) < Decimal("1e-20"):
+    if abs(new_btc) < Decimal("1e-20"):
         new_btc = Decimal("0")
     if new_cash < 0 or new_btc < 0:
         raise RuntimeError("execution produced a negative portfolio balance")
@@ -613,17 +820,21 @@ def _execute_rebalance(
         btc=new_btc,
         reference_price=reference_price,
         costs=config.costs,
+        instrument_rules=config.instrument_rules,
     )
     tolerance = Decimal("1e-18")
-    if post_trade_snapshot.btc_mark_value > config.absolute_btc_cap_cad + tolerance:
-        raise RuntimeError("execution exceeded the absolute BTC exposure cap")
-    if (
-        post_trade_snapshot.btc_liquidation_value
-        > config.max_post_cost_exposure * post_trade_snapshot.equity + tolerance
-    ):
-        raise RuntimeError("execution exceeded the post-cost exposure cap")
-    if new_btc > tolerance and new_cash + tolerance < config.cash_reserve_cad:
-        raise RuntimeError("execution spent the required CAD reserve")
+    if side is TradeSide.BUY:
+        if post_trade_snapshot.btc_mark_value > config.absolute_btc_cap_cad + tolerance:
+            raise RuntimeError("execution exceeded the absolute BTC exposure cap")
+        if (
+            post_trade_snapshot.btc_liquidation_value
+            > config.max_post_cost_exposure * post_trade_snapshot.equity + tolerance
+        ):
+            raise RuntimeError("execution exceeded the post-cost exposure cap")
+        if new_btc > tolerance and new_cash + tolerance < config.cash_reserve_cad:
+            raise RuntimeError("execution spent the required CAD reserve")
+    elif post_trade_snapshot.btc_mark_value > snapshot.btc_mark_value + tolerance:
+        raise RuntimeError("risk-reducing execution increased BTC exposure")
 
     trade_id = _content_id(
         "trade",
@@ -634,14 +845,27 @@ def _execute_rebalance(
             "execution_price": str(execution_price),
             "gross_notional_cad": str(gross_notional),
             "fee_cad": str(fee),
+            "execution_volume_btc": (
+                str(execution_volume_btc) if execution_volume_btc is not None else None
+            ),
+            "volume_cap_applied": volume_cap_applied,
         },
     )
+    participation_fraction = (
+        quantity / execution_volume_btc if execution_volume_btc is not None else None
+    )
+    if (
+        participation_fraction is not None
+        and config.max_execution_volume_fraction is not None
+        and participation_fraction > config.max_execution_volume_fraction
+    ):
+        raise RuntimeError("execution exceeded the configured volume participation cap")
     trade = Trade(
         trade_id=trade_id,
         intent_id=intent_id,
         strategy_decision_id=signal.decision_id,
         decision_time=decision_time,
-        execution_time=candle.open_time,
+        execution_time=execution_time,
         side=side,
         liquidity=liquidity,
         quantity_btc=quantity,
@@ -653,18 +877,25 @@ def _execute_rebalance(
         pre_trade_equity=pre_trade_equity,
         cash_after=new_cash,
         btc_after=new_btc,
+        execution_volume_btc=execution_volume_btc,
+        volume_participation_fraction=participation_fraction,
+        volume_cap_applied=volume_cap_applied,
     )
-    outcome = (
-        ExecutionOutcome.FORCED_LIQUIDATION
-        if drawdown_disarmed
-        else (ExecutionOutcome.BUY if side is TradeSide.BUY else ExecutionOutcome.SELL)
-    )
+    if drawdown_disarmed:
+        if new_btc <= tolerance:
+            outcome = ExecutionOutcome.FORCED_LIQUIDATION
+        elif volume_cap_applied:
+            outcome = ExecutionOutcome.FORCED_LIQUIDATION_PARTIAL_VOLUME_CAPPED
+        else:
+            outcome = ExecutionOutcome.FORCED_LIQUIDATION_PARTIAL
+    else:
+        outcome = ExecutionOutcome.BUY if side is TradeSide.BUY else ExecutionOutcome.SELL
     decision = RebalanceDecision(
         intent_id=intent_id,
         strategy_decision_id=signal.decision_id,
         signal_time=signal.signal_close_time,
         decision_time=decision_time,
-        execution_time=candle.open_time,
+        execution_time=execution_time,
         strategy_reason=signal.reason.value,
         target_weight=effective_target_weight,
         pre_trade_equity=pre_trade_equity,
@@ -674,6 +905,7 @@ def _execute_rebalance(
         rebalance_band_cad=band,
         outcome=outcome,
         trade_id=trade_id,
+        remaining_btc=new_btc if drawdown_disarmed else None,
     )
     return new_cash, new_btc, decision, trade
 
@@ -768,42 +1000,188 @@ def _risk_event(
     )
 
 
+def _index_precise_execution_references(
+    *,
+    candles: Sequence[Candle],
+    config: BacktestConfig,
+    references: Sequence[ExecutionReference],
+) -> dict[datetime, ExecutionReference]:
+    expected_decision_times = {
+        candle.close_time + timedelta(minutes=config.decision_delay_minutes)
+        for candle in candles[:-1]
+    }
+    indexed: dict[datetime, ExecutionReference] = {}
+    for reference in references:
+        if not isinstance(reference, ExecutionReference):
+            raise TypeError("execution_references must contain ExecutionReference instances")
+        if reference.decision_time not in expected_decision_times:
+            raise ValueError("execution reference does not match a scheduled candle decision")
+        if reference.decision_time in indexed:
+            raise ValueError("execution references must have unique decision times")
+        indexed[reference.decision_time] = reference
+    return indexed
+
+
+def _precise_evaluation_start_index(
+    *,
+    candles: Sequence[Candle],
+    config: BacktestConfig,
+    evaluation_start: datetime | None,
+) -> tuple[int, datetime]:
+    if len(candles) < 2:
+        raise ValueError("precise execution requires at least two daily candles")
+
+    if evaluation_start is None:
+        first_decision = candles[0].close_time + timedelta(minutes=config.decision_delay_minutes)
+        return 1, first_decision
+    if not isinstance(evaluation_start, datetime):
+        raise TypeError("evaluation_start must be a datetime")
+    if evaluation_start.tzinfo is None or evaluation_start.utcoffset() != timedelta(0):
+        raise ValueError("evaluation_start must be timezone-aware UTC")
+    if evaluation_start.second != 0 or evaluation_start.microsecond != 0:
+        raise ValueError("evaluation_start must be aligned to a UTC minute")
+
+    for execution_index in range(1, len(candles)):
+        scheduled = candles[execution_index - 1].close_time + timedelta(
+            minutes=config.decision_delay_minutes
+        )
+        if scheduled == evaluation_start:
+            return execution_index, evaluation_start
+    raise ValueError("evaluation_start does not match a scheduled candle decision")
+
+
+def _no_fill_reference_decision(
+    *,
+    signal: StrategyDecision,
+    decision_time: datetime,
+    valuation_price: Decimal,
+    cash: Decimal,
+    btc: Decimal,
+    config: BacktestConfig,
+) -> RebalanceDecision:
+    """Record absent execution evidence without substituting a fill price."""
+
+    snapshot = _portfolio_snapshot(
+        cash=cash,
+        btc=btc,
+        reference_price=valuation_price,
+        costs=config.costs,
+        instrument_rules=config.instrument_rules,
+    )
+    if snapshot.equity <= 0:
+        raise RuntimeError("portfolio equity must remain positive")
+    current_weight = snapshot.btc_liquidation_value / snapshot.equity
+    band = max(
+        config.rebalance_min_cad,
+        config.rebalance_equity_fraction * snapshot.equity,
+    )
+    intent_id = _intent_id(
+        signal,
+        decision_time,
+        decision_time,
+        current_weight,
+        snapshot.equity,
+        Decimal("0"),
+    )
+    return RebalanceDecision(
+        intent_id=intent_id,
+        strategy_decision_id=signal.decision_id,
+        signal_time=signal.signal_close_time,
+        decision_time=decision_time,
+        execution_time=decision_time,
+        strategy_reason=signal.reason.value,
+        target_weight=current_weight,
+        pre_trade_equity=snapshot.equity,
+        current_btc_value=snapshot.btc_liquidation_value,
+        estimated_liquidation_fee_cad=snapshot.estimated_liquidation_fee,
+        requested_delta_cad=Decimal("0"),
+        rebalance_band_cad=band,
+        outcome=ExecutionOutcome.NO_FILL_REFERENCE_UNAVAILABLE,
+        trade_id=None,
+    )
+
+
 def run_backtest(
     candles: Sequence[Candle],
     strategy: MomentumTrendStrategy | None = None,
     config: BacktestConfig | None = None,
+    *,
+    execution_references: Sequence[ExecutionReference] | None = None,
+    evaluation_start: datetime | None = None,
 ) -> BacktestResult:
     """Replay one daily signal with an explicit, executable information clock.
 
     A candle closes at 00:00 UTC, its strategy decision is recorded at 00:15,
     and daily-only replay cannot fill at the already-passed 00:00 open.  It can
     first execute at 00:00 on the following day.  Thus execution candle ``e``
-    is driven only by signal candle ``e - 2``.
+    is driven only by signal candle ``e - 2``.  Supplying
+    ``execution_references`` opts into the precise historical path: candle
+    ``e - 1`` drives a same-day post-decision reference inside candle ``e``.
+    An empty sequence is therefore meaningful and records explicit no-fills.
+
+    ``evaluation_start`` is available only in precise mode.  Earlier candles
+    remain signal warm-up information, while both strategy and benchmark begin
+    with the same initial capital at that scheduled decision boundary.
     """
 
     _validate_backtest_candles(candles)
     selected_strategy = strategy or MomentumTrendStrategy()
     selected_config = config or BacktestConfig()
+    precise_execution = execution_references is not None
+    if not precise_execution and evaluation_start is not None:
+        raise ValueError("evaluation_start requires precise execution references")
+
+    reference_by_decision: dict[datetime, ExecutionReference] = {}
+    first_execution_index = 1
+    precise_start: datetime | None = None
+    if precise_execution:
+        assert execution_references is not None
+        reference_by_decision = _index_precise_execution_references(
+            candles=candles,
+            config=selected_config,
+            references=execution_references,
+        )
+        first_execution_index, precise_start = _precise_evaluation_start_index(
+            candles=candles,
+            config=selected_config,
+            evaluation_start=evaluation_start,
+        )
 
     cash = selected_config.initial_cash
     btc = Decimal("0")
     cumulative_fees = Decimal("0")
+    if precise_execution:
+        assert precise_start is not None
+        initial_reference = reference_by_decision.get(precise_start)
+        initial_price = (
+            initial_reference.reference_price
+            if initial_reference is not None
+            else candles[first_execution_index - 1].close
+        )
+        initial_time = (
+            initial_reference.execution_time if initial_reference is not None else precise_start
+        )
+    else:
+        initial_price = candles[0].close
+        initial_time = candles[0].close_time
     initial_snapshot = _portfolio_snapshot(
         cash=cash,
         btc=btc,
-        reference_price=candles[0].close,
+        reference_price=initial_price,
         costs=selected_config.costs,
+        instrument_rules=selected_config.instrument_rules,
     )
     equity_curve: list[EquityPoint] = [
         EquityPoint(
-            close_time=candles[0].close_time,
-            close=candles[0].close,
+            close_time=initial_time,
+            close=initial_price,
             cash=cash,
             btc=btc,
             equity=initial_snapshot.equity,
             btc_mark_value_cad=initial_snapshot.btc_mark_value,
             estimated_liquidation_fee_cad=initial_snapshot.estimated_liquidation_fee,
             cumulative_fees=cumulative_fees,
+            estimated_liquidation_slippage_cad=(initial_snapshot.estimated_liquidation_slippage),
         )
     ]
     decisions: list[RebalanceDecision] = []
@@ -813,34 +1191,67 @@ def run_backtest(
     high_water_equity = initial_snapshot.equity
     drawdown_disarmed = False
     rolling_loss_blocked_until: datetime | None = None
-    risk_observations: list[tuple[datetime, Decimal]] = [
-        (candles[0].open_time, selected_config.initial_cash),
-        (candles[0].close_time, initial_snapshot.equity),
-    ]
+    if precise_execution:
+        risk_observations = [(initial_time, initial_snapshot.equity)]
+    else:
+        risk_observations = [
+            (candles[0].open_time, selected_config.initial_cash),
+            (candles[0].close_time, initial_snapshot.equity),
+        ]
 
-    for execution_index in range(1, len(candles)):
+    for execution_index in range(first_execution_index, len(candles)):
         execution_candle = candles[execution_index]
-        execution_snapshot = _portfolio_snapshot(
-            cash=cash,
-            btc=btc,
-            reference_price=execution_candle.open,
-            costs=selected_config.costs,
-        )
-        high_water_equity = max(high_water_equity, execution_snapshot.equity)
-
         signal: StrategyDecision | None = None
         decision_time: datetime | None = None
-        if execution_index >= 2:
-            # Do not expose candle e-1: it closes only at the execution open.
-            signal = selected_strategy.evaluate(candles[: execution_index - 1])
+        execution_reference: ExecutionReference | None = None
+        if precise_execution:
+            signal = selected_strategy.evaluate(candles[:execution_index])
             strategy_decisions.append(signal)
             if signal.signal_close_time is None:
                 raise RuntimeError("a daily strategy decision must identify its signal close")
             decision_time = signal.signal_close_time + timedelta(
                 minutes=selected_config.decision_delay_minutes
             )
+            execution_reference = reference_by_decision.get(decision_time)
+            observation_time = (
+                execution_reference.execution_time
+                if execution_reference is not None
+                else decision_time
+            )
+            observation_price = (
+                execution_reference.reference_price
+                if execution_reference is not None
+                else signal.close
+            )
+            if observation_price is None:
+                raise RuntimeError("a daily strategy decision must retain its signal close")
+            required_signal_close_time = execution_candle.open_time
+        else:
+            observation_time = execution_candle.open_time
+            observation_price = execution_candle.open
+            required_signal_close_time = execution_candle.open_time - timedelta(
+                days=selected_config.daily_execution_lag_days
+            )
+            if execution_index >= 2:
+                # Do not expose candle e-1: it closes only at the execution open.
+                signal = selected_strategy.evaluate(candles[: execution_index - 1])
+                strategy_decisions.append(signal)
+                if signal.signal_close_time is None:
+                    raise RuntimeError("a daily strategy decision must identify its signal close")
+                decision_time = signal.signal_close_time + timedelta(
+                    minutes=selected_config.decision_delay_minutes
+                )
 
-        observation_cutoff = execution_candle.open_time - timedelta(days=1)
+        execution_snapshot = _portfolio_snapshot(
+            cash=cash,
+            btc=btc,
+            reference_price=observation_price,
+            costs=selected_config.costs,
+            instrument_rules=selected_config.instrument_rules,
+        )
+        high_water_equity = max(high_water_equity, execution_snapshot.equity)
+
+        observation_cutoff = observation_time - timedelta(days=1)
         reference_24h = next(
             (
                 equity
@@ -856,11 +1267,11 @@ def run_backtest(
                 Decimal("1") - execution_snapshot.equity / reference_24h,
             )
             if rolling_loss >= selected_config.rolling_24h_loss_threshold:
-                rolling_loss_blocked_until = execution_candle.open_time + timedelta(days=1)
+                rolling_loss_blocked_until = observation_time + timedelta(days=1)
                 risk_events.append(
                     _risk_event(
                         event_type=RiskEventType.ROLLING_24H_LOSS_GATE,
-                        observed_at=execution_candle.open_time,
+                        observed_at=observation_time,
                         strategy_decision_id=signal.decision_id if signal else None,
                         equity=execution_snapshot.equity,
                         reference_equity=reference_24h,
@@ -871,7 +1282,7 @@ def run_backtest(
                 )
         if (
             rolling_loss_blocked_until is not None
-            and execution_candle.open_time >= rolling_loss_blocked_until
+            and observation_time >= rolling_loss_blocked_until
         ):
             rolling_loss_blocked_until = None
 
@@ -881,7 +1292,7 @@ def run_backtest(
             risk_events.append(
                 _risk_event(
                     event_type=RiskEventType.DRAWDOWN_DISARMED,
-                    observed_at=execution_candle.open_time,
+                    observed_at=observation_time,
                     strategy_decision_id=signal.decision_id if signal else None,
                     equity=execution_snapshot.equity,
                     reference_equity=high_water_equity,
@@ -892,26 +1303,41 @@ def run_backtest(
             )
 
         exposure_increase_blocked = (
-            rolling_loss_blocked_until is not None
-            and execution_candle.open_time < rolling_loss_blocked_until
+            rolling_loss_blocked_until is not None and observation_time < rolling_loss_blocked_until
         )
         if signal is not None and decision_time is not None:
-            cash, btc, decision, trade = _execute_rebalance(
-                signal=signal,
-                candle=execution_candle,
-                decision_time=decision_time,
-                cash=cash,
-                btc=btc,
-                config=selected_config,
-                exposure_increase_blocked=exposure_increase_blocked,
-                drawdown_disarmed=drawdown_disarmed,
-            )
+            if precise_execution and execution_reference is None:
+                decision = _no_fill_reference_decision(
+                    signal=signal,
+                    decision_time=decision_time,
+                    valuation_price=observation_price,
+                    cash=cash,
+                    btc=btc,
+                    config=selected_config,
+                )
+                trade = None
+            else:
+                cash, btc, decision, trade = _execute_rebalance(
+                    signal=signal,
+                    decision_time=decision_time,
+                    execution_time=observation_time,
+                    reference_price=observation_price,
+                    execution_volume_btc=(
+                        execution_reference.volume_btc if execution_reference is not None else None
+                    ),
+                    required_signal_close_time=required_signal_close_time,
+                    cash=cash,
+                    btc=btc,
+                    config=selected_config,
+                    exposure_increase_blocked=exposure_increase_blocked,
+                    drawdown_disarmed=drawdown_disarmed,
+                )
             decisions.append(decision)
             if decision.outcome is ExecutionOutcome.NO_ACTION_RISK_GATE:
                 risk_events.append(
                     _risk_event(
                         event_type=RiskEventType.EXPOSURE_INCREASE_BLOCKED,
-                        observed_at=execution_candle.open_time,
+                        observed_at=observation_time,
                         strategy_decision_id=signal.decision_id,
                         equity=execution_snapshot.equity,
                         reference_equity=reference_24h or execution_snapshot.equity,
@@ -923,32 +1349,54 @@ def run_backtest(
             if trade is not None:
                 trades.append(trade)
                 cumulative_fees += trade.fee_cad
-                if decision.outcome is ExecutionOutcome.FORCED_LIQUIDATION:
+                if decision.outcome in {
+                    ExecutionOutcome.FORCED_LIQUIDATION,
+                    ExecutionOutcome.FORCED_LIQUIDATION_PARTIAL,
+                    ExecutionOutcome.FORCED_LIQUIDATION_PARTIAL_VOLUME_CAPPED,
+                }:
+                    if decision.outcome is ExecutionOutcome.FORCED_LIQUIDATION:
+                        liquidation_action = (
+                            f"completed_forced_liquidation;remaining_btc={trade.btc_after}"
+                        )
+                    elif (
+                        decision.outcome
+                        is ExecutionOutcome.FORCED_LIQUIDATION_PARTIAL_VOLUME_CAPPED
+                    ):
+                        liquidation_action = (
+                            "attempted_volume_capped_forced_liquidation;"
+                            f"remaining_btc={trade.btc_after}"
+                        )
+                    else:
+                        liquidation_action = (
+                            f"attempted_partial_forced_liquidation;remaining_btc={trade.btc_after}"
+                        )
                     risk_events.append(
                         _risk_event(
                             event_type=RiskEventType.FORCED_LIQUIDATION,
-                            observed_at=execution_candle.open_time,
+                            observed_at=observation_time,
                             strategy_decision_id=signal.decision_id,
                             equity=execution_snapshot.equity,
                             reference_equity=high_water_equity,
                             observed_fraction=drawdown,
                             threshold=selected_config.max_drawdown_threshold,
-                            action="sell_all_btc_with_configured_exit_costs",
+                            action=liquidation_action,
                         )
                     )
 
         post_execution_snapshot = _portfolio_snapshot(
             cash=cash,
             btc=btc,
-            reference_price=execution_candle.open,
+            reference_price=observation_price,
             costs=selected_config.costs,
+            instrument_rules=selected_config.instrument_rules,
         )
-        risk_observations.append((execution_candle.open_time, post_execution_snapshot.equity))
+        risk_observations.append((observation_time, post_execution_snapshot.equity))
         close_snapshot = _portfolio_snapshot(
             cash=cash,
             btc=btc,
             reference_price=execution_candle.close,
             costs=selected_config.costs,
+            instrument_rules=selected_config.instrument_rules,
         )
         high_water_equity = max(high_water_equity, close_snapshot.equity)
         risk_observations.append((execution_candle.close_time, close_snapshot.equity))
@@ -962,23 +1410,62 @@ def run_backtest(
                 btc_mark_value_cad=close_snapshot.btc_mark_value,
                 estimated_liquidation_fee_cad=(close_snapshot.estimated_liquidation_fee),
                 cumulative_fees=cumulative_fees,
+                estimated_liquidation_slippage_cad=(close_snapshot.estimated_liquidation_slippage),
             )
         )
 
-    benchmark_units = selected_config.initial_cash / candles[0].close
-    benchmark_curve = tuple(
-        EquityPoint(
-            close_time=candle.close_time,
-            close=candle.close,
-            cash=Decimal("0"),
-            btc=benchmark_units,
-            equity=benchmark_units * candle.close,
-            btc_mark_value_cad=benchmark_units * candle.close,
-            estimated_liquidation_fee_cad=Decimal("0"),
-            cumulative_fees=Decimal("0"),
+    if precise_execution:
+        assert precise_start is not None
+        benchmark_reference = reference_by_decision.get(precise_start)
+        benchmark_units = (
+            selected_config.initial_cash / benchmark_reference.reference_price
+            if benchmark_reference is not None
+            else Decimal("0")
         )
-        for candle in candles
-    )
+        benchmark_cash = (
+            Decimal("0") if benchmark_reference is not None else selected_config.initial_cash
+        )
+        benchmark_points = [
+            EquityPoint(
+                close_time=initial_time,
+                close=initial_price,
+                cash=benchmark_cash,
+                btc=benchmark_units,
+                equity=selected_config.initial_cash,
+                btc_mark_value_cad=benchmark_units * initial_price,
+                estimated_liquidation_fee_cad=Decimal("0"),
+                cumulative_fees=Decimal("0"),
+            )
+        ]
+        benchmark_points.extend(
+            EquityPoint(
+                close_time=candle.close_time,
+                close=candle.close,
+                cash=benchmark_cash,
+                btc=benchmark_units,
+                equity=benchmark_cash + benchmark_units * candle.close,
+                btc_mark_value_cad=benchmark_units * candle.close,
+                estimated_liquidation_fee_cad=Decimal("0"),
+                cumulative_fees=Decimal("0"),
+            )
+            for candle in candles[first_execution_index:]
+        )
+        benchmark_curve = tuple(benchmark_points)
+    else:
+        benchmark_units = selected_config.initial_cash / candles[0].close
+        benchmark_curve = tuple(
+            EquityPoint(
+                close_time=candle.close_time,
+                close=candle.close,
+                cash=Decimal("0"),
+                btc=benchmark_units,
+                equity=benchmark_units * candle.close,
+                btc_mark_value_cad=benchmark_units * candle.close,
+                estimated_liquidation_fee_cad=Decimal("0"),
+                cumulative_fees=Decimal("0"),
+            )
+            for candle in candles
+        )
     strategy_curve_tuple = tuple(equity_curve)
     trades_tuple = tuple(trades)
     return BacktestResult(

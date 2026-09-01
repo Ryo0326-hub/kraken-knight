@@ -205,6 +205,26 @@ Blockchair research credentials belong only in the separately loaded
 `.env.research.example` surface; the trading-service example does not include
 them.
 
+## Checkpoint 3: historical causal backtest
+
+The current research checkpoint imports Kraken's official BTC/CAD trade archive,
+reconstructs daily candles plus observable post-decision execution VWAPs, and
+runs the frozen strategy from C$1,000. It includes Kraken fees, adverse
+slippage, order increments and minimums, and a 10% execution-minute volume cap.
+The output is an auditable bundle of metrics, decisions, fills, equity,
+drawdown, and pre-holdout robustness charts.
+
+The BTC buy-and-hold comparison is causal too: it accumulates across successive
+available execution minutes under the same 10% cap, and logs every attempt,
+instead of assuming the full C$1,000 filled instantly in one minute.
+
+The final holdout run is bound to a clean Git commit, the frozen study JSON, and
+hashed source data. Neighboring parameters and non-primary cost cases cannot
+inspect the holdout. This makes the result reproducible; it does not make it a
+promise of future profit or authorize live trading. See
+[`docs/HISTORICAL_BACKTEST.md`](docs/HISTORICAL_BACKTEST.md) for the plain-English
+method, exact commands, artifact guide, and suggested blog-post structure.
+
 ## Documentation map
 
 - [`docs/STRATEGY_SPEC.md`](docs/STRATEGY_SPEC.md) — frozen signal, sizing, and
@@ -215,6 +235,8 @@ them.
   persistence, idempotency, and observability.
 - [`docs/RESEARCH_PROTOCOL.md`](docs/RESEARCH_PROTOCOL.md) — causal backtest and
   Blockchair challenger experiment.
+- [`docs/HISTORICAL_BACKTEST.md`](docs/HISTORICAL_BACKTEST.md) — reproducible
+  Kraken data download, frozen study run, outputs, and interpretation.
 - [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — production topology, staged rollout,
   cutover, and rollback.
 - [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — routine operation and incident response.

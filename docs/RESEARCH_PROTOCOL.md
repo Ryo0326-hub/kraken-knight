@@ -74,7 +74,13 @@ close.
 The preferred historical execution reference is the VWAP of the first complete
 one-minute bar, or the trade-derived VWAP for that minute, in
 `[00:15, 00:20] UTC` on `t+1`. A minute occurring before the decision time is
-forbidden. A zero-volume minute is unavailable. If the exact window is
+forbidden. The interval is selected by its minute-open timestamp, while its
+VWAP is timestamped as available only at the minute close; for example, the
+`00:15` interval may execute at `00:16`, never at `00:15`. The `00:19`
+interval becomes available at the `00:20` window boundary. A simulated fill
+may consume at most 10% of the selected minute's observed BTC volume; any
+remainder stays unfilled, and an exchange-minimum remainder records no fill. A
+zero-volume minute is unavailable. If the exact window is
 unavailable, the primary replay records no fill for that date; it does not
 substitute a favorable later close. A separately labeled daily-open approximation
 MAY be reported as a sensitivity analysis, never as exact execution evidence.

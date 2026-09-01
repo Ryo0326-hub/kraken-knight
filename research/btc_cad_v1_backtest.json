@@ -1,0 +1,149 @@
+{
+  "study_id": "btc_cad_price_only_v1_preregistered",
+  "evidence_scope": "historical_price_only",
+  "pair": "BTC/CAD",
+  "dataset": {
+    "source": "Kraken official downloadable historical market data (time and sales)",
+    "source_method": "official_downloadable_time_and_sales_csv",
+    "provider": "Kraken",
+    "documentation_url": "https://support.kraken.com/articles/360047543791-downloadable-historical-market-data-time-and-sales-",
+    "archive_url": "https://drive.google.com/file/d/10zh3tDpqANYvVtYVgczwVz3UZFRUb1el/view",
+    "archive_file_id": "10zh3tDpqANYvVtYVgczwVz3UZFRUb1el",
+    "archive_entry_name": "TimeAndSales_Combined/XBTCAD.csv",
+    "request_pair": "XBTCAD",
+    "raw_csv_sha256": "7210cbce6a23ec7e27f3a8c3fefd45fb9b8e6855702fcfca2c28b8a7af45217c",
+    "raw_csv_crc32": "2b123610",
+    "raw_csv_size_bytes": 139210779,
+    "raw_csv_row_count": 4630185,
+    "zip_compressed_size_bytes": 36888748,
+    "zip_uncompressed_size_bytes": 139210779,
+    "cutoff_exclusive_utc": "2026-01-01T00:00:00Z",
+    "missing_daily_candles": "unavailable_not_forward_filled",
+    "clean_history_rule": "longest_contiguous_utc_daily_sequence_then_earliest_on_tie",
+    "common_warmup_days": 250
+  },
+  "chronological_evaluation": {
+    "development_fraction": "0.60",
+    "validation_fraction": "0.20",
+    "frozen_holdout_fraction": "0.20",
+    "random_split_permitted": false,
+    "risk_free_rate": "0"
+  },
+  "execution": {
+    "decision_delay_minutes_after_daily_close": 15,
+    "window_start_utc": "00:15:00",
+    "window_end_exclusive_utc": "00:20:00",
+    "reference": "vwap_of_first_positive_volume_utc_minute",
+    "reference_interval_timestamp": "minute_open",
+    "reference_available_at": "minute_close_one_minute_after_interval_open",
+    "maximum_execution_minute_volume_participation": "0.10",
+    "buy_and_hold_entry": "accumulate_on_each_available_reference_until_cash_below_minimum_or_cutoff",
+    "missing_reference": "record_no_fill_without_substitution"
+  },
+  "strategy": {
+    "momentum_days": 90,
+    "trend_days": 200,
+    "volatility_days": 30,
+    "annualization_days": 365,
+    "target_annual_volatility": "0.25",
+    "maximum_weight": "0.80"
+  },
+  "portfolio": {
+    "initial_cad": "1000",
+    "cash_reserve_cad": "200",
+    "absolute_btc_cap_cad": "800",
+    "maximum_post_cost_exposure": "0.80",
+    "minimum_rebalance_cad": "50",
+    "minimum_rebalance_equity_fraction": "0.05",
+    "rolling_24h_loss_gate": "0.08",
+    "maximum_drawdown_before_persistent_disarm": "0.20",
+    "automatic_rearm": false,
+    "margin": false,
+    "shorting": false
+  },
+  "instrument_snapshot": {
+    "observed_at_utc": "2026-09-01T03:13:50.871140Z",
+    "exchange_pair": "XXBTZCAD",
+    "status": "online",
+    "price_tick_cad": "0.1",
+    "quantity_decimals": 8,
+    "cost_decimals": 5,
+    "minimum_quantity_btc": "0.00005",
+    "minimum_cost_cad": "1",
+    "historical_assumption": "current_rules_applied_to_all_simulated_dates"
+  },
+  "fee_snapshot": {
+    "observed_at_utc": "2026-09-01T03:13:51.053946Z",
+    "maker_percent": "0.4000",
+    "taker_percent": "0.8000",
+    "maker_fraction": "0.004",
+    "taker_fraction": "0.008"
+  },
+  "primary_cost_case": {
+    "name": "taker_taker_plus_10bps",
+    "buy_fee_fraction": "0.008",
+    "sell_fee_fraction": "0.008",
+    "adverse_slippage_fraction_per_side": "0.001"
+  },
+  "cost_sensitivities": [
+    {
+      "name": "maker_maker",
+      "buy_fee_fraction": "0.004",
+      "sell_fee_fraction": "0.004",
+      "adverse_slippage_fraction_per_side": "0"
+    },
+    {
+      "name": "maker_taker",
+      "buy_fee_fraction": "0.004",
+      "sell_fee_fraction": "0.008",
+      "adverse_slippage_fraction_per_side": "0"
+    },
+    {
+      "name": "taker_taker",
+      "buy_fee_fraction": "0.008",
+      "sell_fee_fraction": "0.008",
+      "adverse_slippage_fraction_per_side": "0"
+    },
+    {
+      "name": "maker_maker_plus_10bps",
+      "buy_fee_fraction": "0.004",
+      "sell_fee_fraction": "0.004",
+      "adverse_slippage_fraction_per_side": "0.001"
+    },
+    {
+      "name": "maker_taker_plus_10bps",
+      "buy_fee_fraction": "0.004",
+      "sell_fee_fraction": "0.008",
+      "adverse_slippage_fraction_per_side": "0.001"
+    },
+    {
+      "name": "taker_taker_plus_10bps",
+      "buy_fee_fraction": "0.008",
+      "sell_fee_fraction": "0.008",
+      "adverse_slippage_fraction_per_side": "0.001"
+    },
+    {
+      "name": "double_primary_costs",
+      "buy_fee_fraction": "0.016",
+      "sell_fee_fraction": "0.016",
+      "adverse_slippage_fraction_per_side": "0.002"
+    }
+  ],
+  "robustness_grid": {
+    "momentum_days": [60, 90, 120],
+    "trend_days": [150, 200, 250],
+    "volatility_days": [20, 30, 60],
+    "selected_point_remains": [90, 200, 30],
+    "optimization_permitted": false
+  },
+  "comparators": [
+    "cad_cash",
+    "fee_aware_btc_buy_and_hold",
+    "close_above_sma200",
+    "positive_90_day_momentum",
+    "combined_momentum_and_sma200_unsized",
+    "frozen_v1"
+  ],
+  "blockchair_included": false,
+  "interpretation_rule": "historical_results_do_not_establish_future_profitability"
+}

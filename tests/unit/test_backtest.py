@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_FLOOR, Decimal
 
 import pytest
 
@@ -9,6 +9,8 @@ from kraken_knight.backtest import (
     BacktestConfig,
     ExecutionCosts,
     ExecutionOutcome,
+    ExecutionReference,
+    InstrumentRules,
     Liquidity,
     RiskEventType,
     TradeSide,
@@ -63,6 +65,23 @@ def zero_band_config(*, costs: ExecutionCosts | None = None) -> BacktestConfig:
         costs=costs or ExecutionCosts(),
         rebalance_min_cad=Decimal("0"),
         rebalance_equity_fraction=Decimal("0"),
+    )
+
+
+def precise_reference(
+    candles: list[Candle],
+    execution_index: int,
+    price: Decimal,
+    *,
+    minute_offset: int = 0,
+) -> ExecutionReference:
+    decision_time = candles[execution_index - 1].close_time + timedelta(minutes=15)
+    return ExecutionReference(
+        decision_time=decision_time,
+        execution_time=decision_time + timedelta(minutes=minute_offset),
+        reference_price=price,
+        volume_btc=Decimal("1.25"),
+        trade_count=7,
     )
 
 
@@ -394,12 +413,62 @@ def test_drawdown_disarm_forces_liquidation_and_persists() -> None:
 
     assert [trade.side for trade in result.trades] == [TradeSide.BUY, TradeSide.SELL]
     assert result.decisions[-2].outcome is ExecutionOutcome.FORCED_LIQUIDATION
+    assert result.decisions[-2].remaining_btc == 0
     assert result.decisions[-1].outcome is ExecutionOutcome.NO_ACTION_DISARMED
     assert result.equity_curve[-1].btc == 0
     assert result.final_risk_state.drawdown_disarmed
     event_types = [event.event_type for event in result.risk_events]
     assert RiskEventType.DRAWDOWN_DISARMED in event_types
     assert RiskEventType.FORCED_LIQUIDATION in event_types
+    forced_event = next(
+        event
+        for event in result.risk_events
+        if event.event_type is RiskEventType.FORCED_LIQUIDATION
+    )
+    assert forced_event.action == "completed_forced_liquidation;remaining_btc=0"
+
+
+def test_volume_capped_forced_liquidation_records_partial_attempt_and_remainder() -> None:
+    candles = rising(202)
+    entry = precise_reference(candles, 200, Decimal("500"))
+    exit_decision = candles[200].close_time + timedelta(minutes=15)
+    capped_exit = ExecutionReference(
+        decision_time=exit_decision,
+        execution_time=exit_decision + timedelta(minutes=1),
+        reference_price=Decimal("50"),
+        volume_btc=Decimal("0.01"),
+        trade_count=2,
+    )
+    config = BacktestConfig(
+        max_execution_volume_fraction=Decimal("0.10"),
+        max_drawdown_threshold=Decimal("0.01"),
+        rebalance_min_cad=Decimal("0"),
+        rebalance_equity_fraction=Decimal("0"),
+    )
+
+    result = run_backtest(
+        candles,
+        config=config,
+        execution_references=(entry, capped_exit),
+        evaluation_start=entry.decision_time,
+    )
+
+    sale = result.trades[-1]
+    decision = result.decisions[-1]
+    forced_event = next(
+        event
+        for event in result.risk_events
+        if event.event_type is RiskEventType.FORCED_LIQUIDATION
+    )
+    assert sale.side is TradeSide.SELL
+    assert sale.volume_cap_applied
+    assert sale.quantity_btc == Decimal("0.001")
+    assert sale.btc_after > 0
+    assert decision.outcome is ExecutionOutcome.FORCED_LIQUIDATION_PARTIAL_VOLUME_CAPPED
+    assert decision.remaining_btc == sale.btc_after
+    assert forced_event.action == (
+        f"attempted_volume_capped_forced_liquidation;remaining_btc={sale.btc_after}"
+    )
 
 
 def test_result_retains_exact_configuration_and_strategy_policy() -> None:
@@ -448,3 +517,410 @@ def test_backtest_config_rejects_invalid_risk_inputs() -> None:
         BacktestConfig(decision_delay_minutes=0)
     with pytest.raises(ValueError, match="execution_lag"):
         BacktestConfig(daily_execution_lag_days=0)
+
+
+def test_precise_execution_uses_previous_completed_candle_at_0015_boundary() -> None:
+    candles = rising(201)
+    reference = precise_reference(candles, 200, Decimal("500"))
+
+    result = run_backtest(
+        candles,
+        config=zero_band_config(),
+        execution_references=(reference,),
+        evaluation_start=reference.decision_time,
+    )
+
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.decision_time == reference.decision_time
+    assert trade.execution_time == reference.decision_time
+    assert trade.reference_price == Decimal("500")
+    assert result.decisions[0].signal_time == candles[199].close_time
+    assert result.strategy_decisions[0].signal_close_time == candles[199].close_time
+    assert result.equity_curve[0].close_time == reference.execution_time
+    assert trade.fee_cad == trade.gross_notional_cad * Decimal("0.004")
+    assert result.metrics.total_fees == trade.fee_cad
+
+
+@pytest.mark.parametrize("minute_offset", [-1, 6])
+def test_precise_execution_rejects_reference_outside_completion_window(
+    minute_offset: int,
+) -> None:
+    candles = rising(201)
+    decision_time = candles[199].close_time + timedelta(minutes=15)
+
+    with pytest.raises(ValueError, match="execution_time"):
+        ExecutionReference(
+            decision_time=decision_time,
+            execution_time=decision_time + timedelta(minutes=minute_offset),
+            reference_price=Decimal("500"),
+            volume_btc=Decimal("1"),
+            trade_count=1,
+        )
+
+
+def test_precise_execution_accepts_last_minute_when_vwap_completes_at_window_end() -> None:
+    candles = rising(201)
+    decision_time = candles[199].close_time + timedelta(minutes=15)
+
+    reference = ExecutionReference(
+        decision_time=decision_time,
+        execution_time=decision_time + timedelta(minutes=5),
+        reference_price=Decimal("500"),
+        volume_btc=Decimal("1"),
+        trade_count=1,
+    )
+
+    assert reference.execution_time == decision_time + timedelta(minutes=5)
+
+
+def test_precise_execution_reference_requires_positive_observed_trade_evidence() -> None:
+    candles = rising(201)
+    decision_time = candles[199].close_time + timedelta(minutes=15)
+
+    with pytest.raises(ValueError, match="reference_price"):
+        ExecutionReference(
+            decision_time=decision_time,
+            execution_time=decision_time,
+            reference_price=Decimal("0"),
+            volume_btc=Decimal("1"),
+            trade_count=1,
+        )
+    with pytest.raises(ValueError, match="volume_btc"):
+        ExecutionReference(
+            decision_time=decision_time,
+            execution_time=decision_time,
+            reference_price=Decimal("500"),
+            volume_btc=Decimal("0"),
+            trade_count=1,
+        )
+    with pytest.raises(ValueError, match="trade_count"):
+        ExecutionReference(
+            decision_time=decision_time,
+            execution_time=decision_time,
+            reference_price=Decimal("500"),
+            volume_btc=Decimal("1"),
+            trade_count=False,
+        )
+
+
+def test_precise_execution_rejects_unbound_and_duplicate_references() -> None:
+    candles = rising(201)
+    reference = precise_reference(candles, 200, Decimal("500"))
+    unbound = ExecutionReference(
+        decision_time=reference.decision_time + timedelta(days=1),
+        execution_time=reference.execution_time + timedelta(days=1),
+        reference_price=reference.reference_price,
+        volume_btc=reference.volume_btc,
+        trade_count=reference.trade_count,
+    )
+
+    with pytest.raises(ValueError, match="scheduled"):
+        run_backtest(candles, execution_references=(unbound,))
+    with pytest.raises(ValueError, match="unique"):
+        run_backtest(candles, execution_references=(reference, reference))
+
+
+def test_missing_precise_reference_records_no_fill_and_keeps_existing_position() -> None:
+    candles = rising(202)
+    entry_reference = precise_reference(candles, 200, Decimal("500"))
+
+    result = run_backtest(
+        candles,
+        config=zero_band_config(),
+        execution_references=(entry_reference,),
+        evaluation_start=entry_reference.decision_time,
+    )
+
+    assert len(result.trades) == 1
+    assert [decision.outcome for decision in result.decisions] == [
+        ExecutionOutcome.BUY,
+        ExecutionOutcome.NO_FILL_REFERENCE_UNAVAILABLE,
+    ]
+    missing = result.decisions[-1]
+    assert missing.execution_time == missing.decision_time
+    assert missing.trade_id is None
+    assert missing.requested_delta_cad == 0
+    assert result.equity_curve[-1].btc == result.trades[0].btc_after
+
+
+def test_future_precise_candle_and_reference_do_not_change_prior_decisions() -> None:
+    short_candles = rising(202)
+    first = precise_reference(short_candles, 200, Decimal("500"))
+    second = precise_reference(short_candles, 201, Decimal("510"), minute_offset=1)
+    short_result = run_backtest(
+        short_candles,
+        config=zero_band_config(),
+        execution_references=(first, second),
+        evaluation_start=first.decision_time,
+    )
+
+    extended_candles = rising(203)
+    extended_candles[202] = candle(202, Decimal("900"), open_price=Decimal("700"))
+    future = precise_reference(extended_candles, 202, Decimal("800"), minute_offset=4)
+    extended_result = run_backtest(
+        extended_candles,
+        config=zero_band_config(),
+        execution_references=(first, second, future),
+        evaluation_start=first.decision_time,
+    )
+
+    assert short_result.strategy_decisions == extended_result.strategy_decisions[:2]
+    assert short_result.decisions == extended_result.decisions[:2]
+    assert short_result.trades == tuple(
+        trade for trade in extended_result.trades if trade.decision_time <= second.decision_time
+    )
+
+
+def test_precise_evaluation_start_keeps_warmup_information_only_and_aligns_benchmark() -> None:
+    candles = rising(253)
+    references = tuple(
+        precise_reference(candles, execution_index, Decimal("500") + execution_index)
+        for execution_index in range(250, 253)
+    )
+    evaluation_start = references[0].decision_time
+
+    result = run_backtest(
+        candles,
+        config=zero_band_config(),
+        execution_references=references,
+        evaluation_start=evaluation_start,
+    )
+
+    assert len(result.decisions) == 3
+    assert result.decisions[0].decision_time == evaluation_start
+    assert result.trades[0].pre_trade_equity == Decimal("1000")
+    assert result.metrics.initial_equity == Decimal("1000")
+    assert result.benchmark_metrics.initial_equity == Decimal("1000")
+    assert result.equity_curve[0].close_time == references[0].execution_time
+    assert result.benchmark_curve[0].close_time == references[0].execution_time
+    assert [point.close_time for point in result.equity_curve] == [
+        point.close_time for point in result.benchmark_curve
+    ]
+
+
+def test_omitted_precise_inputs_preserve_daily_open_replay() -> None:
+    candles = rising(203)
+
+    assert run_backtest(candles) == run_backtest(
+        candles,
+        execution_references=None,
+    )
+    with pytest.raises(ValueError, match="requires precise"):
+        run_backtest(candles, evaluation_start=candles[200].open_time)
+
+
+def test_explicit_instrument_rules_round_price_and_quantity_conservatively() -> None:
+    candles = rising(201)
+    reference = precise_reference(candles, 200, Decimal("500.03"))
+    rules = InstrumentRules(
+        price_tick_cad=Decimal("0.1"),
+        quantity_increment_btc=Decimal("0.00000001"),
+        minimum_quantity_btc=Decimal("0.00005"),
+        minimum_cost_cad=Decimal("1"),
+    )
+    config = BacktestConfig(
+        costs=ExecutionCosts(
+            maker_fee_rate=Decimal("0.008"),
+            taker_fee_rate=Decimal("0.008"),
+            slippage_rate=Decimal("0.001"),
+            buy_liquidity=Liquidity.TAKER,
+            sell_liquidity=Liquidity.TAKER,
+        ),
+        instrument_rules=rules,
+        rebalance_min_cad=Decimal("0"),
+        rebalance_equity_fraction=Decimal("0"),
+    )
+
+    result = run_backtest(
+        candles,
+        config=config,
+        execution_references=(reference,),
+        evaluation_start=reference.decision_time,
+    )
+    trade = result.trades[0]
+
+    assert trade.execution_price == Decimal("500.6")
+    assert trade.quantity_btc % Decimal("0.00000001") == 0
+    assert trade.quantity_btc >= rules.minimum_quantity_btc
+    assert trade.gross_notional_cad >= rules.minimum_cost_cad
+    assert trade.cash_after >= config.cash_reserve_cad
+
+
+def test_explicit_instrument_rules_record_below_minimum_without_fill() -> None:
+    candles = rising(201)
+    reference = precise_reference(candles, 200, Decimal("500"))
+    config = BacktestConfig(
+        instrument_rules=InstrumentRules(
+            price_tick_cad=Decimal("0.1"),
+            quantity_increment_btc=Decimal("0.00000001"),
+            minimum_quantity_btc=Decimal("2"),
+            minimum_cost_cad=Decimal("1"),
+        ),
+        rebalance_min_cad=Decimal("0"),
+        rebalance_equity_fraction=Decimal("0"),
+    )
+
+    result = run_backtest(
+        candles,
+        config=config,
+        execution_references=(reference,),
+        evaluation_start=reference.decision_time,
+    )
+
+    assert result.trades == ()
+    assert result.decisions[0].outcome is ExecutionOutcome.BELOW_EXCHANGE_MINIMUM
+
+
+def test_instrument_rules_reject_invalid_values_and_types() -> None:
+    with pytest.raises(ValueError, match="price_tick_cad"):
+        InstrumentRules(
+            price_tick_cad=Decimal("0"),
+            quantity_increment_btc=Decimal("0.00000001"),
+            minimum_quantity_btc=Decimal("0.00005"),
+            minimum_cost_cad=Decimal("1"),
+        )
+    with pytest.raises(ValueError, match="cannot be smaller"):
+        InstrumentRules(
+            price_tick_cad=Decimal("0.1"),
+            quantity_increment_btc=Decimal("0.001"),
+            minimum_quantity_btc=Decimal("0.00005"),
+            minimum_cost_cad=Decimal("1"),
+        )
+    with pytest.raises(TypeError, match="instrument_rules"):
+        BacktestConfig(instrument_rules="not-rules")  # type: ignore[arg-type]
+
+
+def test_precise_fill_is_capped_by_observed_minute_volume_participation() -> None:
+    candles = rising(201)
+    reference = precise_reference(candles, 200, Decimal("500"))
+    config = BacktestConfig(
+        max_execution_volume_fraction=Decimal("0.10"),
+        rebalance_min_cad=Decimal("0"),
+        rebalance_equity_fraction=Decimal("0"),
+    )
+
+    result = run_backtest(
+        candles,
+        config=config,
+        execution_references=(reference,),
+        evaluation_start=reference.decision_time,
+    )
+    trade = result.trades[0]
+
+    assert trade.execution_volume_btc == Decimal("1.25")
+    assert trade.quantity_btc == Decimal("0.125")
+    assert trade.volume_participation_fraction == Decimal("0.10")
+
+    with pytest.raises(ValueError, match="max_execution_volume_fraction"):
+        BacktestConfig(max_execution_volume_fraction=Decimal("0"))
+    with pytest.raises(ValueError, match="max_execution_volume_fraction"):
+        BacktestConfig(max_execution_volume_fraction=Decimal("1.01"))
+
+
+def test_liquidation_equity_uses_configured_sell_fee_and_exit_slippage() -> None:
+    costs = ExecutionCosts(
+        maker_fee_rate=Decimal("0.01"),
+        taker_fee_rate=Decimal("0.02"),
+        slippage_rate=Decimal("0.03"),
+        buy_liquidity=Liquidity.TAKER,
+        sell_liquidity=Liquidity.MAKER,
+    )
+    candles = rising(201)
+    reference = precise_reference(candles, 200, Decimal("500"))
+
+    result = run_backtest(
+        candles,
+        config=zero_band_config(costs=costs),
+        execution_references=(reference,),
+        evaluation_start=reference.decision_time,
+    )
+    final = result.equity_curve[-1]
+    mark = final.btc * final.close
+    liquidation_notional = mark * Decimal("0.97")
+
+    assert final.estimated_liquidation_slippage_cad == mark - liquidation_notional
+    assert final.estimated_liquidation_fee_cad == liquidation_notional * Decimal("0.01")
+    assert final.equity == final.cash + liquidation_notional * Decimal("0.99")
+
+
+def test_liquidation_equity_rounds_exit_price_down_to_exchange_tick() -> None:
+    costs = ExecutionCosts(
+        maker_fee_rate=Decimal("0.01"),
+        taker_fee_rate=Decimal("0.02"),
+        slippage_rate=Decimal("0.03"),
+        buy_liquidity=Liquidity.TAKER,
+        sell_liquidity=Liquidity.MAKER,
+    )
+    rules = InstrumentRules(
+        price_tick_cad=Decimal("0.1"),
+        quantity_increment_btc=Decimal("0.00000001"),
+        minimum_quantity_btc=Decimal("0.00005"),
+        minimum_cost_cad=Decimal("1"),
+    )
+    candles = rising(201)
+    candles[200] = candle(200, Decimal("140.03"))
+    reference = precise_reference(candles, 200, Decimal("500"))
+
+    result = run_backtest(
+        candles,
+        config=BacktestConfig(
+            costs=costs,
+            instrument_rules=rules,
+            rebalance_min_cad=Decimal("0"),
+            rebalance_equity_fraction=Decimal("0"),
+        ),
+        execution_references=(reference,),
+        evaluation_start=reference.decision_time,
+    )
+    final = result.equity_curve[-1]
+    unrounded_sell_price = final.close * Decimal("0.97")
+    rounded_sell_price = (unrounded_sell_price / rules.price_tick_cad).to_integral_value(
+        rounding=ROUND_FLOOR
+    ) * rules.price_tick_cad
+    liquidation_notional = final.btc * rounded_sell_price
+
+    assert rounded_sell_price < unrounded_sell_price
+    assert final.estimated_liquidation_slippage_cad == (
+        final.btc_mark_value_cad - liquidation_notional
+    )
+    assert final.estimated_liquidation_fee_cad == liquidation_notional * Decimal("0.01")
+    assert final.equity == final.cash + liquidation_notional * Decimal("0.99")
+
+
+def test_risk_reducing_sell_rounding_never_exceeds_minute_participation_cap() -> None:
+    candles = rising(202)
+    candles[200] = candle(200, Decimal("50"), open_price=Decimal("50"))
+    entry = precise_reference(candles, 200, Decimal("500"))
+    exit_decision = candles[200].close_time + timedelta(minutes=15)
+    exit_reference = ExecutionReference(
+        decision_time=exit_decision,
+        execution_time=exit_decision + timedelta(minutes=1),
+        reference_price=Decimal("50"),
+        volume_btc=Decimal("0.00123456"),
+        trade_count=2,
+    )
+    config = BacktestConfig(
+        instrument_rules=InstrumentRules(
+            price_tick_cad=Decimal("0.1"),
+            quantity_increment_btc=Decimal("0.00000001"),
+            minimum_quantity_btc=Decimal("0.00000001"),
+            minimum_cost_cad=Decimal("0.00000001"),
+        ),
+        max_execution_volume_fraction=Decimal("0.10"),
+        rebalance_min_cad=Decimal("0"),
+        rebalance_equity_fraction=Decimal("0"),
+    )
+
+    result = run_backtest(
+        candles,
+        config=config,
+        execution_references=(entry, exit_reference),
+        evaluation_start=entry.decision_time,
+    )
+    sell = result.trades[-1]
+
+    assert sell.side is TradeSide.SELL
+    assert sell.quantity_btc <= exit_reference.volume_btc * Decimal("0.10")
+    assert sell.volume_participation_fraction is not None
+    assert sell.volume_participation_fraction <= Decimal("0.10")

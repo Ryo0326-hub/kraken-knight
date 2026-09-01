@@ -15,8 +15,21 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from kraken_knight.config import ConfigError, Settings
+from kraken_knight.daily_job import (
+    PRODUCTION_RELEASES_ROOT,
+    Clock,
+    DailyJobError,
+    DailyOhlcSource,
+    execute_daily_decision,
+    release_id_from_env,
+    utc_now,
+    validate_daily_environment,
+    validate_daily_settings,
+    verify_release_binding,
+)
 from kraken_knight.kraken_read import KrakenReadError
 from kraken_knight.ledger import Ledger, LedgerError
+from kraken_knight.market_data import MarketDataError
 from kraken_knight.reconcile_job import (
     ReconciliationJobError,
     discover_read_only_account_id,
@@ -74,6 +87,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="restricted JSON file containing non-authoritative legacy submission hints",
     )
+
+    daily_parser = subparsers.add_parser(
+        "daily",
+        help="record one public-data V3 daily decision without exchange writes",
+    )
+    daily_parser.add_argument("--json", action="store_true", dest="as_json")
     return parser
 
 
@@ -81,6 +100,10 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     environ: Mapping[str, str] | None = None,
+    daily_client: DailyOhlcSource | None = None,
+    daily_clock: Clock = utc_now,
+    daily_release_path: Path | None = None,
+    daily_releases_root: Path = PRODUCTION_RELEASES_ROOT,
 ) -> int:
     """Run the local-only CLI and return a process exit code."""
 
@@ -88,9 +111,11 @@ def main(
     arguments = parser.parse_args(argv)
     exit_code = 0
     try:
+        command = str(arguments.command)
+        if command == "daily":
+            validate_daily_environment(environ)
         settings = Settings.from_env(environ)
         ledger = Ledger(settings.ledger_path)
-        command = str(arguments.command)
         if command == "init":
             previous_umask = os.umask(0o077)
             try:
@@ -137,12 +162,36 @@ def main(
             payload["operation"] = "reconcile"
             if payload["status"] != "CLEAN":
                 exit_code = 3
+        elif command == "daily":
+            validate_daily_settings(settings)
+            release_id = release_id_from_env(environ)
+            verify_release_binding(
+                release_id=release_id,
+                release_path=daily_release_path or Path.cwd(),
+                releases_root=daily_releases_root,
+            )
+            previous_umask = os.umask(0o077)
+            try:
+                ledger.initialize()
+            finally:
+                os.umask(previous_umask)
+            payload = execute_daily_decision(
+                settings=settings,
+                ledger=ledger,
+                release_id=release_id,
+                release_path=daily_release_path,
+                releases_root=daily_releases_root,
+                public_client=daily_client,
+                clock=daily_clock,
+            )
         else:  # argparse enforces the choices; this protects future edits.
             parser.error("unknown command")
     except (
         ConfigError,
+        DailyJobError,
         KrakenReadError,
         LedgerError,
+        MarketDataError,
         OSError,
         ReconciliationJobError,
         ValueError,
@@ -194,6 +243,24 @@ def _emit(payload: Mapping[str, object], *, as_json: bool) -> None:
         ):
             print(f"reconciliation.{key}={payload[key]}")
         return
+    if payload["operation"] == "daily":
+        for key in (
+            "decision_id",
+            "strategy_date",
+            "strategy_id",
+            "outcome",
+            "reason",
+            "state",
+            "target_weight",
+            "drawdown_policy_mode",
+            "order_intent_created",
+            "configuration_hash",
+            "input_data_hash",
+            "release_id",
+            "evaluated_at",
+        ):
+            print(f"daily.{key}={payload[key]}")
+        return
     configuration = payload["configuration"]
     ledger = payload["ledger"]
     if not isinstance(configuration, Mapping) or not isinstance(ledger, Mapping):
@@ -202,6 +269,7 @@ def _emit(payload: Mapping[str, object], *, as_json: bool) -> None:
         "mode",
         "pair",
         "strategy_id",
+        "drawdown_policy_mode",
         "account_id",
         "ledger_path",
         "live_armed",

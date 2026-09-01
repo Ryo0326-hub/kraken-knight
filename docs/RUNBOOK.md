@@ -135,9 +135,9 @@ and implemented checks at its recorded time.
 
 | Severity | Examples | Initial action |
 | --- | --- | --- |
-| SEV-1 | Unknown live order, unexplained balance, credential exposure, concurrent writer, drawdown disarm, unauthorized transfer | Disarm immediately, preserve evidence, reconcile; revoke credentials when compromise is possible |
+| SEV-1 | Unknown live order, unexplained balance, credential exposure, concurrent writer, unauthorized transfer | Disarm immediately, preserve evidence, reconcile; revoke credentials when compromise is possible |
 | SEV-2 | Kraken outage with resting order, partial fill not converging, database integrity failure, disk full, missing daily heartbeat in live mode | Block new exposure, inspect/reconcile, notify operator promptly |
-| SEV-3 | Stale candle causing no action, Telegram delivery failure with local health intact, Blockchair collection/schema failure | Keep or reduce risk according to policy, repair without inventing data |
+| SEV-3 | Stale candle causing no action, reconciled high-water drawdown of at least 20%, Telegram delivery failure with local health intact, Blockchair collection/schema failure | Review promptly, keep or reduce risk only according to policy, and repair without inventing data |
 | INFO | Normal no-trade, validated cancellation, release/shadow heartbeat | Record and review in the daily heartbeat |
 
 Response targets are operational priorities, not promises of resolution. A SEV-1
@@ -145,9 +145,10 @@ is never downgraded merely because market exposure is small.
 
 ## 3. Expected daily heartbeat
 
-This is a later shadow/live acceptance contract. Checkpoint 2 does not schedule
-the daily strategy or deliver Telegram alerts, so this section is not evidence
-that a heartbeat currently exists.
+The current shadow service schedules and journals a public-data daily decision,
+but it does not yet deliver Telegram alerts or report account/order/fill fields.
+Those additional fields remain the later shadow/live acceptance contract; this
+section is not evidence that an alert channel or live heartbeat exists.
 
 The job runs at 00:15 UTC. By 00:30 UTC, the operator should receive one daily
 heartbeat containing:
@@ -272,7 +273,7 @@ An HTTP/WebSocket timeout, disconnect, or ambiguous error after submission is
 6. A mismatch above tested rounding tolerance is SEV-1 until explained. Rearm
    requires a clean signed reconciliation.
 
-## 10. Rolling-loss and drawdown gates
+## 10. Rolling-loss gate and drawdown telemetry
 
 ### 8% rolling-24-hour gate
 
@@ -281,19 +282,20 @@ An HTTP/WebSocket timeout, disconnect, or ambiguous error after submission is
 - Exposure reduction and reconciliation continue; entries remain blocked through
   the stored gate-expiry time.
 - Do not manually clear or shorten the 24-hour block.
-- Expiry does not override another disarm or drawdown event.
+- Expiry does not override another active disarm or safety failure.
 
-### 20% high-water drawdown
+### High-water drawdown telemetry
 
-- Treat the alert as SEV-1.
-- Confirm disarmed state was persisted before exit attempts.
-- Confirm all proven bot-owned orders were canceled.
-- Observe bounded target-cash attempts, partial fills, and residual dust.
-- If the market moves beyond the exit collar or Kraken is unavailable, preserve
-  the disarmed target-cash state and escalate; do not authorize an unbounded
-  market order from Telegram.
-- Complete incident review before any rearm. The high-water mark is not reset by
-  restarting, redeploying, depositing funds, or clicking rearm.
+- Confirm the high-water mark and drawdown were calculated from reconciled,
+  cash-flow-adjusted, fee-aware equity.
+- Classify a reconciled drawdown of at least 20% as SEV-3 and notify the operator
+  promptly. Do not alter the V3 target, cancel orders, force liquidation, or
+  disarm solely because that percentage threshold was crossed.
+- Investigate surprising values as a possible price, balance, fee, or accounting
+  defect. Any underlying account-integrity failure still follows the relevant
+  disarm procedure.
+- Preserve high-water history across restart and deployment for honest telemetry;
+  resetting a chart must not rewrite performance history.
 
 ## 11. Emergency disarm and target cash
 
@@ -388,7 +390,7 @@ private-API process, or an unexplained nonce stream appears:
 - Record API version/schema/cache metadata and the failed contract validation.
 - Never fill the missing feature from a future response or reuse yesterday's
   feature as though current.
-- The V1 price-only decision remains independent. Confirm that no production
+- The V3 price-only decision remains independent. Confirm that no production
   strategy hash or target changed.
 - A Blockchair failure can delay challenger shadow qualification indefinitely;
   it cannot promote a fallback feature or bypass the 30-day shadow requirement.
@@ -405,7 +407,7 @@ private-API process, or an unexplained nonce stream appears:
 
 ## 18. Manual rearm checklist
 
-Rearm after a drawdown, credential incident, account mismatch, second writer,
+Rearm after a credential incident, account mismatch, second writer,
 database integrity failure, or unauthorized trade requires all of:
 
 - incident cause and timeline documented;

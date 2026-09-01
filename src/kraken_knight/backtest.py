@@ -14,6 +14,7 @@ from enum import StrEnum
 from itertools import pairwise
 
 from .domain import Candle, to_decimal
+from .risk import DrawdownPolicyMode as DrawdownPolicyMode
 from .strategy import (
     DecisionReason,
     MomentumTrendStrategy,
@@ -55,19 +56,6 @@ class RiskEventType(StrEnum):
     DRAWDOWN_DISARMED = "drawdown_disarmed"
     DRAWDOWN_REARMED = "drawdown_rearmed"
     FORCED_LIQUIDATION = "forced_liquidation"
-
-
-class DrawdownPolicyMode(StrEnum):
-    """Research policy for the high-water drawdown circuit breaker.
-
-    ``PERSISTENT`` is the original fail-closed behavior and remains the default.
-    The other modes are explicit research variants; selecting one cannot happen
-    through an omitted configuration value.
-    """
-
-    PERSISTENT = "persistent"
-    DISABLED = "disabled"
-    COOLDOWN_REARM = "cooldown_rearm"
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +170,13 @@ class ExecutionReference:
 
 @dataclass(frozen=True, slots=True)
 class BacktestConfig:
+    """Replay assumptions; the default preserves the sealed V1 control.
+
+    Production V3 must select :attr:`DrawdownPolicyMode.DISABLED` explicitly.
+    Keeping the replay default persistent prevents an omitted research setting
+    from silently changing the sealed V1/V2 comparison.
+    """
+
     initial_cash: Decimal = Decimal("1000")
     costs: ExecutionCosts = ExecutionCosts()
     instrument_rules: InstrumentRules | None = None

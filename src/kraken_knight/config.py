@@ -18,9 +18,12 @@ from ipaddress import ip_address
 from pathlib import Path
 
 from kraken_knight.provenance import sha256_json
+from kraken_knight.risk import DrawdownPolicyMode
 
 ENV_PREFIX = "KRAKEN_KNIGHT_"
 LIVE_CONFIRMATION = "I_UNDERSTAND_LIVE_ORDERS"
+SEALED_V1_STRATEGY_ID = "btc_cad_daily_momentum_v1"
+PRODUCTION_STRATEGY_ID = "btc_cad_daily_momentum_v3_no_drawdown"
 
 
 class ConfigError(ValueError):
@@ -65,21 +68,24 @@ class SecretValue:
 
 @dataclass(frozen=True, slots=True)
 class FrozenRiskSettings:
-    """Normative BTC/CAD V1 risk values.
+    """Normative BTC/CAD production V3 risk values.
 
     These are intentionally code-frozen instead of environment-tunable.  Any
     change requires a new strategy version and its own research/release review.
-    ``__post_init__`` also protects callers that try to override a dataclass
-    constructor argument directly.
+    The retained 20% drawdown value is telemetry-only while the mode is
+    ``DISABLED``. ``__post_init__`` also protects callers that try to override a
+    dataclass constructor argument directly.
     """
 
     target_annual_volatility: Decimal = Decimal("0.25")
     max_exposure_fraction: Decimal = Decimal("0.80")
+    absolute_btc_cap_cad: Decimal = Decimal("800")
     cash_reserve_cad: Decimal = Decimal("200")
     min_rebalance_notional_cad: Decimal = Decimal("50")
     min_rebalance_equity_fraction: Decimal = Decimal("0.05")
     rolling_24h_loss_gate_fraction: Decimal = Decimal("0.08")
     high_water_drawdown_fraction: Decimal = Decimal("0.20")
+    drawdown_policy_mode: DrawdownPolicyMode = DrawdownPolicyMode.DISABLED
     max_entry_spread_bps: Decimal = Decimal("20")
     risk_exit_price_collar_bps: Decimal = Decimal("50")
     max_price_attempts: int = 3
@@ -87,9 +93,15 @@ class FrozenRiskSettings:
     allow_short: bool = False
 
     def __post_init__(self) -> None:
+        if self.drawdown_policy_mode is not DrawdownPolicyMode.DISABLED:
+            raise ConfigError(
+                f"drawdown_policy_mode is frozen for {PRODUCTION_STRATEGY_ID}; "
+                "create and validate a new strategy version to change it"
+            )
         expected: dict[str, Decimal | int | bool] = {
             "target_annual_volatility": Decimal("0.25"),
             "max_exposure_fraction": Decimal("0.80"),
+            "absolute_btc_cap_cad": Decimal("800"),
             "cash_reserve_cad": Decimal("200"),
             "min_rebalance_notional_cad": Decimal("50"),
             "min_rebalance_equity_fraction": Decimal("0.05"),
@@ -104,7 +116,7 @@ class FrozenRiskSettings:
         for name, required_value in expected.items():
             if getattr(self, name) != required_value:
                 raise ConfigError(
-                    f"{name} is frozen for btc_cad_daily_momentum_v1; "
+                    f"{name} is frozen for {PRODUCTION_STRATEGY_ID}; "
                     "create and validate a new strategy version to change it"
                 )
 
@@ -116,7 +128,9 @@ class FrozenRiskSettings:
             {
                 "allow_margin": self.allow_margin,
                 "allow_short": self.allow_short,
+                "absolute_btc_cap_cad": self.absolute_btc_cap_cad,
                 "cash_reserve_cad": self.cash_reserve_cad,
+                "drawdown_policy_mode": self.drawdown_policy_mode,
                 "high_water_drawdown_fraction": self.high_water_drawdown_fraction,
                 "max_entry_spread_bps": self.max_entry_spread_bps,
                 "max_exposure_fraction": self.max_exposure_fraction,
@@ -145,7 +159,7 @@ class Settings:
     state_dir: Path = Path("var")
     account_id: str = "dedicated-btc-cad"
     pair: str = "BTC/CAD"
-    strategy_id: str = "btc_cad_daily_momentum_v1"
+    strategy_id: str = PRODUCTION_STRATEGY_ID
     risk: FrozenRiskSettings = field(default_factory=FrozenRiskSettings)
     live_trading_enabled: bool = False
     live_trading_confirmation: str = field(default="", repr=False)
@@ -171,9 +185,11 @@ class Settings:
                 "Checkpoint 2 freezes account_id; changing the account binding requires review"
             )
         if self.pair != "BTC/CAD":
-            raise ConfigError("btc_cad_daily_momentum_v1 is frozen to BTC/CAD")
-        if self.strategy_id != "btc_cad_daily_momentum_v1":
+            raise ConfigError(f"{PRODUCTION_STRATEGY_ID} is frozen to BTC/CAD")
+        if self.strategy_id != PRODUCTION_STRATEGY_ID:
             raise ConfigError("unsupported strategy_id")
+        if type(self.risk) is not FrozenRiskSettings:
+            raise ConfigError("risk must be the frozen production V3 settings")
 
         confirmation_matches = hmac.compare_digest(
             self.live_trading_confirmation,
@@ -271,7 +287,7 @@ class Settings:
             pair=values.get(f"{ENV_PREFIX}PAIR", "BTC/CAD").strip().upper(),
             strategy_id=values.get(
                 f"{ENV_PREFIX}STRATEGY_ID",
-                "btc_cad_daily_momentum_v1",
+                PRODUCTION_STRATEGY_ID,
             ).strip(),
             live_trading_enabled=_parse_bool(
                 values.get(f"{ENV_PREFIX}LIVE_TRADING_ENABLED", "false"),
@@ -331,6 +347,7 @@ class Settings:
                 and self.expected_kraken_account_id is not None
             ),
             "cutover_quiesced": self.cutover_quiesced,
+            "drawdown_policy_mode": self.risk.drawdown_policy_mode.value,
             "legacy_manifest_pinned": self.expected_legacy_manifest_hash is not None,
             "funding_manifest_pinned": self.expected_funding_manifest_hash is not None,
             "ledger_path": str(self.ledger_path),

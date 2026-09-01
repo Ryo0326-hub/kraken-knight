@@ -65,6 +65,7 @@ jobs:
           sudo install -d /opt/kraken-knight/current/.venv/bin /etc/kraken-knight
           sudo ln -sf /usr/bin/true /opt/kraken-knight/current/.venv/bin/kraken-knight
           sudo install -m 0640 /dev/null /etc/kraken-knight/config.env
+          sudo install -m 0640 /dev/null /etc/kraken-knight/daily.env
           systemd-analyze verify \
             deploy/systemd/kraken-knight.service \
             deploy/systemd/kraken-knight.timer \

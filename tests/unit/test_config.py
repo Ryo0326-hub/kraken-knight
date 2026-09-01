@@ -11,12 +11,15 @@ import kraken_knight.cli as cli_module
 from kraken_knight.cli import main
 from kraken_knight.config import (
     LIVE_CONFIRMATION,
+    PRODUCTION_STRATEGY_ID,
+    SEALED_V1_STRATEGY_ID,
     ConfigError,
     FrozenRiskSettings,
     ResearchSettings,
     RunMode,
     Settings,
 )
+from kraken_knight.risk import DrawdownPolicyMode
 
 
 def test_default_mode_is_shadow_and_uses_local_state() -> None:
@@ -26,6 +29,8 @@ def test_default_mode_is_shadow_and_uses_local_state() -> None:
     assert settings.live_armed is False
     assert settings.ledger_path == Path("var/kraken-knight.sqlite3")
     assert settings.pair == "BTC/CAD"
+    assert settings.strategy_id == PRODUCTION_STRATEGY_ID
+    assert settings.risk.drawdown_policy_mode is DrawdownPolicyMode.DISABLED
 
 
 @pytest.mark.parametrize("mode", ["backtest", "paper", "shadow", "validate"])
@@ -100,6 +105,16 @@ def test_live_arms_are_rejected_outside_live_mode() -> None:
 def test_account_alias_cannot_bypass_the_checkpoint_two_identity_boundary() -> None:
     with pytest.raises(ConfigError, match="freezes account_id"):
         Settings.from_env({"KRAKEN_KNIGHT_ACCOUNT_ID": "same-account-new-label"})
+
+
+def test_sealed_v1_strategy_id_cannot_be_selected_as_the_production_default() -> None:
+    with pytest.raises(ConfigError, match="unsupported strategy_id"):
+        Settings.from_env({"KRAKEN_KNIGHT_STRATEGY_ID": SEALED_V1_STRATEGY_ID})
+
+
+def test_runtime_cannot_replace_the_frozen_production_risk_policy() -> None:
+    with pytest.raises(ConfigError, match="frozen production V3"):
+        Settings(risk=object())  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -197,6 +212,20 @@ def test_frozen_risk_settings_are_immutable_and_have_a_stable_hash() -> None:
 
     assert risk.fingerprint == second.fingerprint
     assert len(risk.fingerprint) == 64
+    assert risk.drawdown_policy_mode is DrawdownPolicyMode.DISABLED
+    assert risk.target_annual_volatility == Decimal("0.25")
+    assert risk.max_exposure_fraction == Decimal("0.80")
+    assert risk.absolute_btc_cap_cad == Decimal("800")
+    assert risk.cash_reserve_cad == Decimal("200")
+    assert risk.min_rebalance_notional_cad == Decimal("50")
+    assert risk.min_rebalance_equity_fraction == Decimal("0.05")
+    assert risk.rolling_24h_loss_gate_fraction == Decimal("0.08")
+    assert risk.high_water_drawdown_fraction == Decimal("0.20")
+    assert risk.max_entry_spread_bps == Decimal("20")
+    assert risk.risk_exit_price_collar_bps == Decimal("50")
+    assert risk.max_price_attempts == 3
+    assert risk.allow_margin is False
+    assert risk.allow_short is False
     with pytest.raises(FrozenInstanceError):
         risk.max_exposure_fraction = Decimal("0.75")  # type: ignore[misc]
 
@@ -204,6 +233,10 @@ def test_frozen_risk_settings_are_immutable_and_have_a_stable_hash() -> None:
 def test_frozen_risk_override_requires_a_new_strategy_version() -> None:
     with pytest.raises(ConfigError, match="frozen"):
         FrozenRiskSettings(max_exposure_fraction=Decimal("0.75"))
+    with pytest.raises(ConfigError, match="drawdown_policy_mode"):
+        FrozenRiskSettings(drawdown_policy_mode=DrawdownPolicyMode.PERSISTENT)
+    with pytest.raises(ConfigError, match="drawdown_policy_mode"):
+        FrozenRiskSettings(drawdown_policy_mode="disabled")  # type: ignore[arg-type]
 
 
 def test_boolean_arming_parser_is_strict() -> None:
@@ -229,6 +262,8 @@ def test_cli_initializes_and_reports_local_only_status(
     assert main(["status", "--json"], environ=environment) == 0
     status_payload = json.loads(capsys.readouterr().out)
     assert status_payload["operation"] == "status"
+    assert status_payload["configuration"]["strategy_id"] == PRODUCTION_STRATEGY_ID
+    assert status_payload["configuration"]["drawdown_policy_mode"] == "disabled"
     assert status_payload["ledger"]["initialized"] is True
     assert status_payload["ledger"]["reconciliation_count"] == 0
 

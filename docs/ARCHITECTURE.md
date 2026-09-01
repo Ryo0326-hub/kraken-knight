@@ -14,7 +14,7 @@ Kraken Knight is designed around five invariants:
    balances, and incidents are immutable facts from which current state is
    derived.
 5. **Research cannot bypass production policy.** Blockchair and challenger-model
-   failures have no path to V1 live targets or orders.
+   failures have no path to production live targets or orders.
 
 The system is intentionally small enough to audit on a 1 GB droplet. It uses a
 typed Python application, SQLite in write-ahead-log mode for transactional local
@@ -100,7 +100,7 @@ names evolve:
 | `domain` | Money, quantity, candle, signal, target, intent, order, fill, and reason types | Perform network or database I/O |
 | `kraken_read` / `market` | Allowlisted account reads, OHLC history, instrument rules, server time, validation | Accept an arbitrary private method or write to Kraken |
 | `reconciliation` | Normalize exchange facts, match legacy hints, classify safety | Treat a hint or missing page as exchange truth |
-| `data.blockchair` | Raw archival, metadata, confirmation and availability rules | Feed V1 live decisions |
+| `data.blockchair` | Raw archival, metadata, confirmation and availability rules | Feed production live decisions |
 | `strategy` | Frozen indicators and raw target calculation | Submit orders or relax risk gates |
 | `risk` | Capital constraints, circuit breakers, target reduction, armed state | Increase a strategy target |
 | `execution` | Intent planning, bounded order attempts, reconciliation | Invent missing fills or blindly retry unknown submissions |
@@ -321,7 +321,7 @@ read consumes its nonce and the workflow fails closed. A malformed response
 cannot default to a buy. Kraken private calls are serialized to preserve nonce
 ordering. Blockchair request points are recorded locally, requests are
 serialized within the research budget, and quota or compatibility failure stops
-research collection without affecting V1. The client never retries without its
+research collection without affecting production. The client never retries without its
 configured key or logs the secret-bearing request URL.
 
 Deployment, data migration, and rearm are privileged operator actions. The
@@ -344,11 +344,11 @@ Before live canary, automated or recorded tests must prove:
 - termination at every execution-state transition recovers correctly;
 - a submission timeout is reconciled without blind retry;
 - partial fill plus restart produces only the correct remainder;
-- disarmed and drawdown state survives process and host restart;
+- disarmed state and high-water drawdown telemetry survive process and host restart;
 - stale/incomplete candles, stale books, unknown balances, and fee/rule failures
   cannot increase exposure;
 - simulated fees, cash reserve, rounding, and P&L match hand calculations;
-- Blockchair failure cannot affect the V1 target;
+- Blockchair failure cannot affect the production target;
 - Blockchair six-successor depth, incomplete-day rejection, actual observation
   availability, schema quarantine, request-point exhaustion, and refusal of a
   keyless fallback match the research protocol; and

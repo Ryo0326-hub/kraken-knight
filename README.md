@@ -15,7 +15,7 @@ martingale sizing, intraday prediction, or AI-generated trading override.
 > configured drawdown threshold during gaps, outages, or failed execution. It is
 > not investment advice and makes no claim of future profitability.
 
-## Frozen V1 policy
+## Production V3 policy
 
 At 00:15 UTC, using only the most recently completed UTC daily candle:
 
@@ -27,13 +27,15 @@ At 00:15 UTC, using only the most recently completed UTC daily candle:
    over normal rebalance thresholds.
 4. A normal rebalance requires a target change of at least the greater of C$50
    or 5% of current equity.
-5. An 8% rolling-24-hour equity loss blocks exposure increases for 24 hours. A
-   20% high-water-mark drawdown targets cash, disarms trading, and requires a
-   manual review and rearm.
+5. An 8% rolling-24-hour equity loss blocks exposure increases for 24 hours.
+   High-water drawdown remains visible telemetry but does not change the target
+   or arm state by itself.
 
-The exact formulas, time conventions, and decision rules are normative in
-[`docs/STRATEGY_SPEC.md`](docs/STRATEGY_SPEC.md). Risk precedence and failure
-behavior are normative in [`docs/RISK_POLICY.md`](docs/RISK_POLICY.md).
+The production delta and unchanged controls are normative in
+[`docs/PRODUCTION_STRATEGY_V3.md`](docs/PRODUCTION_STRATEGY_V3.md). The sealed
+V1 formulas and historical risk policy remain in
+[`docs/STRATEGY_SPEC.md`](docs/STRATEGY_SPEC.md) and
+[`docs/RISK_POLICY.md`](docs/RISK_POLICY.md).
 
 ## Engineering success versus trading success
 
@@ -77,9 +79,10 @@ correctness, reconciliation, observability, and risk behavior.
 
 ## Research design
 
-The price-only V1 is the production baseline. Blockchair is an optional,
-lagged on-chain data source used to test whether on-chain variables add genuine
-out-of-sample information. It cannot block or change V1 trading.
+The price-only no-drawdown V3 policy is the production baseline. Blockchair is
+an optional, lagged on-chain data source used to test whether on-chain variables
+add genuine out-of-sample information. It cannot block or change production
+trading.
 
 The study compares price-only, on-chain-only, and combined models with
 content-addressed raw snapshots, time-causal feature availability, a frozen
@@ -104,15 +107,16 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for components and invariants
 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for release and old-bot cutover gates,
 and [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for operator procedures.
 
-## Checkpoint 2: authenticated read-only reconciliation
+## Current implementation: V3 shadow and read-only reconciliation
 
-The current implementation adds an authenticated Kraken read path to the
-Checkpoint 1 research core. It reads a closed allowlist of instrument, fee,
-balance, order, trade, ledger, and API-key metadata endpoints; validates and
-redacts their responses; and produces a deterministic account reconciliation.
-Private requests use Kraken signing, serialized monotonic nonces, bounded
-responses, and a conservative per-run request-cost budget. There is no arbitrary
-private-method escape hatch.
+The current implementation records one credential-free V3 shadow decision from
+Kraken's public BTC/CAD daily candles. It quarantines the mutable final candle,
+requires fresh contiguous history, binds the result to an immutable release,
+and appends one idempotent decision without creating an order intent. A separate
+authenticated read path reads a closed allowlist of instrument, fee, balance,
+order, trade, ledger, and API-key metadata endpoints; validates and redacts the
+responses; and produces a deterministic account reconciliation. There is no
+arbitrary private-method or exchange-write escape hatch.
 
 Reconciliation classifies an observation as `CLEAN`, `UNRESOLVED`, or
 `DISARMED`, records `exchange_writes: false`, and can append a content-addressed
@@ -182,13 +186,12 @@ Kraken reports more records than a page can hold, completeness fails and the run
 cannot be `CLEAN`. This one-page ceiling is an explicit Checkpoint 2 limitation,
 not a claim that all account history was fetched.
 
-Checkpoint 2 still rejects live mode even when credential and environment-arm
-fields are populated. The adapter has no submit, edit, or cancel method, the
-provided reconciliation timer is not enabled, and neither the droplet nor the
-legacy service has been changed by this repository checkpoint. A real account
-reconciliation remains pending until the operator creates the new key and
-performs the supervised procedure. Deployment, durable arming, execution,
-Telegram alerts, and Blockchair ingestion remain later gated checkpoints.
+The application still rejects live mode even when credential and environment-arm
+fields are populated. The adapter has no submit, edit, or cancel method. The
+daily timer may be deployed only with its credential-free environment; the
+provided reconciliation timer remains disabled until the supervised account
+procedure is complete. Durable arming, execution, Telegram alerts, and
+Blockchair ingestion remain later gated checkpoints.
 
 The public smoke command prints an explicitly labeled engineering report; its
 short rolling window is not the research-grade profitability backtest. A clean
@@ -237,8 +240,9 @@ post-holdout counterfactuals: the signal without the drawdown gate, and the same
 20% liquidation followed by a fixed 90-day cooldown plus causal trend rearm.
 All data, timing, costs, and volume assumptions remain unchanged. See
 [`docs/DRAWDOWN_COUNTERFACTUAL.md`](docs/DRAWDOWN_COUNTERFACTUAL.md) for the
-frozen rules and reproducible run contract. These exploratory variants do not
-alter the manual-rearm production policy.
+frozen rules and reproducible run contract. After reviewing this exploratory
+result, the no-gate variant was promoted as the separately versioned production
+V3 configuration; the sealed study itself remains unchanged.
 
 The sealed V2 run is no longer flat: C$1,000 reaches C$3,028.90 without the
 drawdown gate and C$2,792.13 with mechanical rearm, versus C$14,286.86 for
@@ -249,10 +253,14 @@ validation. See
 
 ## Documentation map
 
+- [`docs/PRODUCTION_STRATEGY_V3.md`](docs/PRODUCTION_STRATEGY_V3.md) — current
+  production identity, no-drawdown delta, unchanged controls, and release boundary.
+- [`docs/DAILY_SHADOW.md`](docs/DAILY_SHADOW.md) — credential-free daily command,
+  release binding, idempotency, and operator checks.
 - [`docs/STRATEGY_SPEC.md`](docs/STRATEGY_SPEC.md) — frozen signal, sizing, and
-  decision semantics.
-- [`docs/RISK_POLICY.md`](docs/RISK_POLICY.md) — capital boundary, circuit
-  breakers, security, and precedence.
+  V1 decision semantics retained as the calculation baseline.
+- [`docs/RISK_POLICY.md`](docs/RISK_POLICY.md) — sealed V1 capital boundary,
+  circuit breakers, security, and precedence.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — components, data flow,
   persistence, idempotency, and observability.
 - [`docs/RESEARCH_PROTOCOL.md`](docs/RESEARCH_PROTOCOL.md) — causal backtest and
@@ -277,8 +285,8 @@ Kraken key must be IP-allowlisted and limited to the four read permissions liste
 above. The old and new bots must never share an API key or concurrently write to
 the account.
 
-Until the later checkpoints pass, this repository is not a deployable or live
-trading system.
+This repository is deployable as a public-data shadow decision recorder and
+read-only reconciliation tool. It is not yet a live trading system.
 
 ## License
 

@@ -7,11 +7,11 @@ Ubuntu droplet and the replacement of the existing ML bot. It is not permission
 to deploy from an unreviewed working tree or to send a live trade before the
 release gates pass.
 
-Checkpoint 2 stops before deployment. It provides authenticated read-only
-reconciliation code and inactive systemd templates, but no credential has been
-created or installed, no real Kraken reconciliation has been recorded, and no
-host service or legacy process has been changed. The procedures below remain
-operator-controlled release gates, not a report that cutover occurred.
+The current release supports a bounded, credential-free daily shadow deployment
+and a separate authenticated read-only reconciliation command. It still has no
+exchange-write adapter and cannot be armed live. The reconciliation timer and
+every live stage remain operator-controlled release gates; this public document
+is not evidence that a particular host or account completed them.
 
 Host-specific audit facts, paths, service names, and process evidence belong in
 the restricted cutover record and MUST be rechecked at cutover.
@@ -30,6 +30,7 @@ Recommended filesystem separation:
 /opt/kraken-knight/releases/<git-commit>/   immutable application release
 /opt/kraken-knight/current                 atomic symlink to active release
 /etc/kraken-knight/config.env              root/service-readable secrets, mode
+/etc/kraken-knight/daily.env               credential-free V3 shadow configuration
 /var/lib/kraken-knight/                    SQLite ledger, locks, snapshots
 /var/lib/kraken-knight/artifacts/          redacted run manifests and reports
 /var/backups/kraken-knight/                restricted encrypted/checksummed backup
@@ -40,9 +41,15 @@ configuration are not writable by that account; only the state/artifact
 directories are. Secret files are mode `0600` or an equivalent systemd
 credential mechanism. journald receives structured, redacted logs.
 
+The primary daily service loads only `daily.env`, pins `shadow`, and makes
+`config.env` inaccessible in its service namespace. The reconciliation service
+alone loads `config.env`. Set the daily release ID to the full lowercase Git SHA
+and install that build at `/opt/kraken-knight/releases/<same-sha>`; the daily
+command verifies the resolved working directory before it records a decision.
+
 Systemd unit templates:
 
-- `kraken-knight.service` — finite daily decision and bounded execution;
+- `kraken-knight.service` — finite public-data daily shadow decision recorder;
 - `kraken-knight.timer` — schedules 00:15 UTC with persistence disabled
   for missed live decisions unless replay safety explicitly handles the date;
 - `kraken-knight-reconcile.service` / `.timer` — read/reconcile health and
@@ -104,7 +111,7 @@ preserve nonce order. Kraken API-key metadata is validated in memory; its API-ke
 identifier is not stored in a report, ledger row, log, or alert.
 
 Blockchair URLs are sanitized before logging because the API key may be supplied
-as a query parameter. The production V1 service should not receive the
+as a query parameter. The production V3 service should not receive the
 Blockchair secret at all.
 
 The tracked examples enforce that separation: `.env.example` is the trading
@@ -143,8 +150,9 @@ The release must pass:
 - idempotent rerun and duplicate-order prevention;
 - simulated restart at every execution-state transition;
 - timeout/unknown-submission and partial-fill recovery;
-- drawdown/disarmed-state persistence across restart;
-- Blockchair/V1 separation and schema-contract tests; and
+- disarmed-state and high-water-telemetry persistence across restart;
+- proof that drawdown alone cannot disarm or force-liquidate production V3;
+- Blockchair/production separation and schema-contract tests; and
 - redaction tests for secrets, signed requests, and query-string keys.
 
 Checkpoint 2 additionally requires fixed-fixture proof of Kraken request
@@ -244,7 +252,7 @@ Cutover is a maintenance event with a single-writer invariant:
 Create an immutable Kraken Knight opening-balance event with CAD, BTC, reference
 price, estimated liquidation fees, open orders (normally none), and source
 account-history hashes. Existing BTC is opening inventory, not Kraken Knight
-profit. The operator explicitly acknowledges whether V1 may rebalance that
+profit. The operator explicitly acknowledges whether V3 may rebalance that
 inventory after arming.
 
 Only after these steps may the new read-only/shadow services start. There is no
@@ -292,8 +300,10 @@ does not justify inventing one; the operational probe already tested execution.
 ### Stage 5 — controlled C$1,000 sleeve
 
 After signed review, raise the absolute cap to C$800 while retaining the 80%
-equity cap, C$200 reserve, volatility target, and all circuit breakers. The
-effective cap is always the most conservative applicable constraint.
+equity cap, C$200 reserve, volatility target, 8% rolling-loss block, data and
+account-integrity gates, operator disarm, spread bound, and execution collars.
+The 20% high-water drawdown level remains telemetry-only in V3. The effective
+cap is always the most conservative applicable constraint.
 
 Promotion depends on engineering evidence, not positive P&L. A risk event,
 unknown order, unexplained balance, missed heartbeat, failed alert, or integrity

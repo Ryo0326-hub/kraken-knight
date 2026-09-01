@@ -8,7 +8,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 
-from kraken_knight.backtest import run_backtest
+from kraken_knight.backtest import BacktestConfig, run_backtest
+from kraken_knight.config import FrozenRiskSettings
 from kraken_knight.market_data import KrakenPublicClient, validate_batch_freshness
 from kraken_knight.strategy import MomentumTrendStrategy
 
@@ -32,8 +33,21 @@ def main() -> None:
     if len(batch.completed) < MomentumTrendStrategy().policy.minimum_history:
         raise RuntimeError("Kraken public window is too short for the frozen strategy")
 
+    production_risk = FrozenRiskSettings()
     decision = MomentumTrendStrategy().evaluate(batch.completed)
-    replay = run_backtest(batch.completed)
+    replay = run_backtest(
+        batch.completed,
+        config=BacktestConfig(
+            cash_reserve_cad=production_risk.cash_reserve_cad,
+            absolute_btc_cap_cad=production_risk.absolute_btc_cap_cad,
+            max_post_cost_exposure=production_risk.max_exposure_fraction,
+            rebalance_min_cad=production_risk.min_rebalance_notional_cad,
+            rebalance_equity_fraction=production_risk.min_rebalance_equity_fraction,
+            rolling_24h_loss_threshold=production_risk.rolling_24h_loss_gate_fraction,
+            max_drawdown_threshold=production_risk.high_water_drawdown_fraction,
+            drawdown_policy_mode=production_risk.drawdown_policy_mode,
+        ),
+    )
     decision_time = decision.signal_close_time and decision.signal_close_time + timedelta(
         minutes=replay.config.decision_delay_minutes
     )
@@ -68,7 +82,8 @@ def main() -> None:
                 "cash_reserve_cad": replay.config.cash_reserve_cad,
                 "rolling_24h_loss_threshold": (replay.config.rolling_24h_loss_threshold),
                 "max_drawdown_threshold": replay.config.max_drawdown_threshold,
-                "drawdown_action": "persistent disarm and forced liquidation",
+                "drawdown_policy_mode": replay.config.drawdown_policy_mode,
+                "drawdown_action": "telemetry only; no drawdown-triggered target change",
             },
         },
         "replay": {

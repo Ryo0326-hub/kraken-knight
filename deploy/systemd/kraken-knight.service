@@ -10,14 +10,15 @@ Type=oneshot
 User=kraken-knight
 Group=kraken-knight
 WorkingDirectory=/opt/kraken-knight/current
-EnvironmentFile=/etc/kraken-knight/config.env
+EnvironmentFile=/etc/kraken-knight/daily.env
+UnsetEnvironment=KRAKEN_KNIGHT_MODE
 Environment=PYTHONUNBUFFERED=1
 UMask=0077
 
-# Checkpoint 2 keeps the daily strategy job local-only. Authenticated reads run
-# only through the separate reconciliation unit; this unit cannot trade.
-ExecStart=/opt/kraken-knight/current/.venv/bin/kraken-knight init
-ExecStart=/opt/kraken-knight/current/.venv/bin/kraken-knight status
+# Production V3 records one public-data shadow decision. Authenticated reads run
+# only through the separate reconciliation unit; this command has no broker or
+# exchange-write adapter and cannot create an order intent.
+ExecStart=/opt/kraken-knight/current/.venv/bin/kraken-knight daily --json
 
 StateDirectory=kraken-knight
 StateDirectoryMode=0700
@@ -37,7 +38,8 @@ ProtectKernelTunables=yes
 ProtectProc=invisible
 ProtectSystem=strict
 ProcSubset=pid
-ReadOnlyPaths=/etc/kraken-knight/config.env
+ReadOnlyPaths=/etc/kraken-knight/daily.env
+InaccessiblePaths=/etc/kraken-knight/config.env
 ReadWritePaths=/var/lib/kraken-knight
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes

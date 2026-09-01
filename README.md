@@ -240,6 +240,13 @@ All data, timing, costs, and volume assumptions remain unchanged. See
 frozen rules and reproducible run contract. These exploratory variants do not
 alter the manual-rearm production policy.
 
+The sealed V2 run is no longer flat: C$1,000 reaches C$3,028.90 without the
+drawdown gate and C$2,792.13 with mechanical rearm, versus C$14,286.86 for
+fee-aware BTC buy and hold. The strategies experience much smaller historical
+drawdowns, but the result is post-holdout exploratory rather than fresh
+validation. See
+[`docs/DRAWDOWN_COUNTERFACTUAL_RESULTS_2026-01-01.md`](docs/DRAWDOWN_COUNTERFACTUAL_RESULTS_2026-01-01.md).
+
 ## Documentation map
 
 - [`docs/STRATEGY_SPEC.md`](docs/STRATEGY_SPEC.md) — frozen signal, sizing, and
@@ -256,6 +263,8 @@ alter the manual-rearm production policy.
   sealed V1 result, visuals, limitations, and next research question.
 - [`docs/DRAWDOWN_COUNTERFACTUAL.md`](docs/DRAWDOWN_COUNTERFACTUAL.md) — frozen
   post-holdout V2 variants, causal rearm rule, and audit contract.
+- [`docs/DRAWDOWN_COUNTERFACTUAL_RESULTS_2026-01-01.md`](docs/DRAWDOWN_COUNTERFACTUAL_RESULTS_2026-01-01.md)
+  — sealed V2 metrics, visuals, risk cycles, and interpretation.
 - [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — production topology, staged rollout,
   cutover, and rollback.
 - [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — routine operation and incident response.

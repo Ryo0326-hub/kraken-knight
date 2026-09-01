@@ -225,6 +225,13 @@ promise of future profit or authorize live trading. See
 [`docs/HISTORICAL_BACKTEST.md`](docs/HISTORICAL_BACKTEST.md) for the plain-English
 method, exact commands, artifact guide, and suggested blog-post structure.
 
+The first sealed result grew C$1,000 to C$1,225.27, then triggered the 20%
+drawdown disarm in May 2020 and stayed in cash. Its holdout return was therefore
+0% with no market exposure: an engineering-valid result, but not evidence of
+out-of-sample profitability. See
+[`docs/BACKTEST_RESULTS_2026-01-01.md`](docs/BACKTEST_RESULTS_2026-01-01.md) for
+the graphs, metrics, and interpretation.
+
 ## Documentation map
 
 - [`docs/STRATEGY_SPEC.md`](docs/STRATEGY_SPEC.md) — frozen signal, sizing, and
@@ -237,6 +244,8 @@ method, exact commands, artifact guide, and suggested blog-post structure.
   Blockchair challenger experiment.
 - [`docs/HISTORICAL_BACKTEST.md`](docs/HISTORICAL_BACKTEST.md) — reproducible
   Kraken data download, frozen study run, outputs, and interpretation.
+- [`docs/BACKTEST_RESULTS_2026-01-01.md`](docs/BACKTEST_RESULTS_2026-01-01.md) —
+  sealed V1 result, visuals, limitations, and next research question.
 - [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — production topology, staged rollout,
   cutover, and rollback.
 - [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — routine operation and incident response.

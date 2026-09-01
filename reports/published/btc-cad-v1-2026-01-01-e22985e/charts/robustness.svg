@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="650" viewBox="0 0 1200 650" role="img" aria-labelledby="title description">
+<title id="title">Parameter-neighborhood robustness</title>
+<desc id="description">Development + validation only; frozen holdout is hidden from neighboring cells</desc>
+<rect width="1200" height="650" fill="#08111f"/>
+<rect x="32" y="28" width="1136" height="594" rx="18" fill="#0d1b2e" stroke="#29415f"/>
+<text x="64" y="65" fill="#e7eef8" font-size="25" font-family="ui-sans-serif,system-ui" font-weight="700">Parameter-neighborhood robustness</text>
+<text x="64" y="88" fill="#9fb0c6" font-size="13" font-family="ui-sans-serif,system-ui">Development + validation only; frozen holdout is hidden from neighboring cells</text>
+<text x="266" y="128" text-anchor="middle" fill="#e7eef8" font-size="15" font-family="ui-sans-serif,system-ui" font-weight="700">Volatility 20d</text>
+<text x="159.333" y="153" text-anchor="middle" fill="#9fb0c6" font-size="11" font-family="ui-monospace,monospace">SMA 150</text>
+<text x="266" y="153" text-anchor="middle" fill="#9fb0c6" font-size="11" font-family="ui-monospace,monospace">SMA 200</text>
+<text x="372.667" y="153" text-anchor="middle" fill="#9fb0c6" font-size="11" font-family="ui-monospace,monospace">SMA 250</text>
+<text x="94" y="221" text-anchor="end" fill="#9fb0c6" font-size="11" font-family="ui-monospace,monospace">MOM 60</text>
+<rect x="106" y="166" width="101.667" height="97" rx="8" fill="#27aca0" stroke="#29415f" stroke-width="1"/>
+<text x="156.833" y="222" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+1.75</text>
+<rect x="212.667" y="166" width="101.667" height="97" rx="8" fill="#17414e" stroke="#29415f" stroke-width="1"/>
+<text x="263.5" y="222" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+0.26</text>
+<rect x="319.333" y="166" width="101.667" height="97" rx="8" fill="#163e4c" stroke="#29415f" stroke-width="1"/>
+<text x="370.167" y="222" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+0.22</text>
+<text x="94" y="323" text-anchor="end" fill="#9fb0c6" font-size="11" font-family="ui-monospace,monospace">MOM 90</text>
+<rect x="106" y="268" width="101.667" height="97" rx="8" fill="#184b57" stroke="#29415f" stroke-width="1"/>
+<text x="156.833" y="324" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+0.41</text>
+<rect x="212.667" y="268" width="101.667" height="97" rx="8" fill="#173f4d" stroke="#29415f" stroke-width="1"/>
+<text x="263.5" y="324" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+0.24</text>
+<rect x="319.333" y="268" width="101.667" height="97" rx="8" fill="#163e4c" stroke="#29415f" stroke-width="1"/>
+<text x="370.167" y="324" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+0.22</text>
+<text x="94" y="425" text-anchor="end" fill="#9fb0c6" font-size="11" font-family="ui-monospace,monospace">MOM 120</text>
+<rect x="106" y="370" width="101.667" height="97" rx="8" fill="#17414e" stroke="#29415f" stroke-width="1"/>
+<text x="156.833" y="426" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+0.26</text>
+<rect x="212.667" y="370" width="101.667" height="97" rx="8" fill="#17414e" stroke="#29415f" stroke-width="1"/>
+<text x="263.5" y="426" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+0.26</text>
+<rect x="319.333" y="370" width="101.667" height="97" rx="8" fill="#173f4d" stroke="#29415f" stroke-width="1"/>
+<text x="370.167" y="426" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+0.23</text>
+<text x="620" y="128" text-anchor="middle" fill="#e7eef8" font-size="15" font-family="ui-sans-serif,system-ui" font-weight="700">Volatility 30d</text>
+<text x="513.333" y="153" text-anchor="middle" fill="#9fb0c6" font-size="11" font-family="ui-monospace,monospace">SMA 150</text>
+<text x="620" y="153" text-anchor="middle" fill="#9fb0c6" font-size="11" font-family="ui-monospace,monospace">SMA 200</text>
+<text x="726.667" y="153" text-anchor="middle" fill="#9fb0c6" font-size="11" font-family="ui-monospace,monospace">SMA 250</text>
+<rect x="460" y="166" width="101.667" height="97" rx="8" fill="#27ada1" stroke="#29415f" stroke-width="1"/>
+<text x="510.833" y="222" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+1.76</text>
+<rect x="566.667" y="166" width="101.667" height="97" rx="8" fill="#173f4d" stroke="#29415f" stroke-width="1"/>
+<text x="617.5" y="222" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+0.23</text>
+<rect x="673.333" y="166" width="101.667" height="97" rx="8" fill="#163e4c" stroke="#29415f" stroke-width="1"/>
+<text x="724.167" y="222" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+0.23</text>
+<rect x="460" y="268" width="101.667" height="97" rx="8" fill="#184a55" stroke="#29415f" stroke-width="1"/>
+<text x="510.833" y="324" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+0.39</text>
+<rect x="566.667" y="268" width="101.667" height="97" rx="8" fill="#163e4c" stroke="#fbbf24" stroke-width="4"/>
+<text x="617.5" y="324" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+0.23</text>
+<rect x="673.333" y="268" width="101.667" height="97" rx="8" fill="#173f4d" stroke="#29415f" stroke-width="1"/>
+<text x="724.167" y="324" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+0.24</text>
+<rect x="460" y="370" width="101.667" height="97" rx="8" fill="#173f4d" stroke="#29415f" stroke-width="1"/>
+<text x="510.833" y="426" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+0.24</text>
+<rect x="566.667" y="370" width="101.667" height="97" rx="8" fill="#173f4d" stroke="#29415f" stroke-width="1"/>
+<text x="617.5" y="426" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+0.24</text>
+<rect x="673.333" y="370" width="101.667" height="97" rx="8" fill="#163c4b" stroke="#29415f" stroke-width="1"/>
+<text x="724.167" y="426" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+0.19</text>
+<text x="974" y="128" text-anchor="middle" fill="#e7eef8" font-size="15" font-family="ui-sans-serif,system-ui" font-weight="700">Volatility 60d</text>
+<text x="867.333" y="153" text-anchor="middle" fill="#9fb0c6" font-size="11" font-family="ui-monospace,monospace">SMA 150</text>
+<text x="974" y="153" text-anchor="middle" fill="#9fb0c6" font-size="11" font-family="ui-monospace,monospace">SMA 200</text>
+<text x="1080.667" y="153" text-anchor="middle" fill="#9fb0c6" font-size="11" font-family="ui-monospace,monospace">SMA 250</text>
+<rect x="814" y="166" width="101.667" height="97" rx="8" fill="#28b2a5" stroke="#29415f" stroke-width="1"/>
+<text x="864.833" y="222" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+1.84</text>
+<rect x="920.667" y="166" width="101.667" height="97" rx="8" fill="#207d7c" stroke="#29415f" stroke-width="1"/>
+<text x="971.5" y="222" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+1.10</text>
+<rect x="1027.333" y="166" width="101.667" height="97" rx="8" fill="#259e96" stroke="#29415f" stroke-width="1"/>
+<text x="1078.167" y="222" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+1.56</text>
+<rect x="814" y="268" width="101.667" height="97" rx="8" fill="#2dd4bf" stroke="#29415f" stroke-width="1"/>
+<text x="864.833" y="324" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+2.31</text>
+<rect x="920.667" y="268" width="101.667" height="97" rx="8" fill="#163e4c" stroke="#29415f" stroke-width="1"/>
+<text x="971.5" y="324" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+0.23</text>
+<rect x="1027.333" y="268" width="101.667" height="97" rx="8" fill="#2ac1b0" stroke="#29415f" stroke-width="1"/>
+<text x="1078.167" y="324" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+2.04</text>
+<rect x="814" y="370" width="101.667" height="97" rx="8" fill="#2bc6b5" stroke="#29415f" stroke-width="1"/>
+<text x="864.833" y="426" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+2.12</text>
+<rect x="920.667" y="370" width="101.667" height="97" rx="8" fill="#218683" stroke="#29415f" stroke-width="1"/>
+<text x="971.5" y="426" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+1.22</text>
+<rect x="1027.333" y="370" width="101.667" height="97" rx="8" fill="#218180" stroke="#29415f" stroke-width="1"/>
+<text x="1078.167" y="426" text-anchor="middle" fill="#ffffff" font-size="15" font-family="ui-monospace,monospace" font-weight="700">+1.16</text>
+<circle cx="105" cy="526" r="7" fill="#fb7185"/>
+<text x="119" y="530" fill="#9fb0c6" font-size="12" font-family="ui-sans-serif,system-ui">negative</text>
+<circle cx="206" cy="526" r="7" fill="#2dd4bf"/>
+<text x="220" y="530" fill="#9fb0c6" font-size="12" font-family="ui-sans-serif,system-ui">positive</text>
+<rect x="311" y="519" width="14" height="14" rx="2" fill="none" stroke="#fbbf24" stroke-width="3"/>
+<text x="334" y="530" fill="#9fb0c6" font-size="12" font-family="ui-sans-serif,system-ui">pre-registered 90/200/30</text>
+<text x="106" y="580" fill="#9fb0c6" font-size="12" font-family="ui-sans-serif,system-ui">Cell value: pre-holdout total return. This grid diagnoses fragility; it does not select a winner.</text>
+</svg>

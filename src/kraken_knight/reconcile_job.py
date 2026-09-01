@@ -140,7 +140,7 @@ class KrakenReadPort(Protocol):
     def get_ledgers(
         self,
         *,
-        account_id: str,
+        account_id: str | None,
         entry_type: str = "all",
         start: int | None = None,
         end: int | None = None,
@@ -1427,7 +1427,10 @@ def _execute_read_only_reconciliation_unleased(
         pair="XBTCAD",
     )
     ledgers = reader.get_ledgers(
-        account_id=settings.expected_kraken_account_id,
+        # Kraken's live main-wallet endpoint rejects its optional account_id
+        # selector. The preceding gates prove that the authenticated default is
+        # the one active main wallet and equals the protected canonical ID.
+        account_id=None,
         entry_type="all",
         start=start_epoch,
         end=end_epoch,
@@ -1446,7 +1449,7 @@ def _execute_read_only_reconciliation_unleased(
         pair="XBTCAD",
     )
     tail_ledgers = reader.get_ledgers(
-        account_id=settings.expected_kraken_account_id,
+        account_id=None,
         entry_type="all",
         start=end_epoch,
         end=tail_end_epoch,

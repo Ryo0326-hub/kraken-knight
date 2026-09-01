@@ -448,7 +448,7 @@ class FakeKrakenReadPort:
     def get_ledgers(
         self,
         *,
-        account_id: str,
+        account_id: str | None,
         entry_type: str = "all",
         start: int | None = None,
         end: int | None = None,
@@ -456,7 +456,7 @@ class FakeKrakenReadPort:
     ) -> LedgerPage:
         self._private("get_ledgers", 4)
         self._ledger_calls += 1
-        assert account_id == EXPECTED_ACCOUNT_ID
+        assert account_id is None
         assert entry_type == "all"
         assert start is not None
         assert end is not None
@@ -707,6 +707,37 @@ def test_multiple_active_wallets_stop_before_default_scoped_reads(tmp_path: Path
     assert result["history"] is None
     assert _gate_value(result, "one_active_wallet") is False
     assert "get_extended_balances" not in client.calls
+    assert "get_ledgers" not in client.calls
+
+
+def test_incomplete_wallet_page_stops_before_default_scoped_reads(tmp_path: Path) -> None:
+    wallets = WalletAccountsSnapshot(
+        accounts=(
+            WalletAccount(
+                account_id=EXPECTED_ACCOUNT_ID,
+                status="active",
+                account_type="main",
+                active=True,
+                user_defined=False,
+            ),
+        ),
+        complete=False,
+        observed_at=OBSERVED_AT,
+    )
+    client = FakeKrakenReadPort(wallet_accounts=wallets)
+
+    result = execute_read_only_reconciliation(
+        settings=_settings(tmp_path),
+        ledger=_ledger(tmp_path),
+        legacy_hints=_legacy_hints(),
+        client=client,
+    )
+
+    assert result["status"] == ReconciliationStatus.DISARMED.value
+    assert result["history"] is None
+    assert _gate_value(result, "wallet_accounts_page_complete") is False
+    assert "get_extended_balances" not in client.calls
+    assert "get_ledgers" not in client.calls
 
 
 def test_unverified_mistyped_account_binding_does_not_poison_continuity(

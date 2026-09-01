@@ -62,6 +62,13 @@ one account-lifetime page and one fenced-tail page per endpoint, capped at 50
 count beyond any page capacity fails completeness, so the workflow cannot call a
 larger account history `CLEAN`.
 
+Kraken's main-wallet `Ledgers` endpoint is read without its optional
+`account_id` selector because the live main-wallet request rejected that
+selector. This is allowed only after the wallet gates prove that Kraken returned
+one complete, active main wallet and that its canonical ID equals the protected
+binding; a second active wallet stops the workflow before any default-scoped
+history read.
+
 The reconciliation core is exchange-independent. It canonicalizes observed
 facts and legacy hints, applies deterministic completeness and safety gates, and
 emits `CLEAN`, `UNRESOLVED`, or `DISARMED` with a source hash and

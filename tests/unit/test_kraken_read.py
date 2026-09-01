@@ -420,7 +420,7 @@ def test_trade_and_ledger_history_preserve_ids_fees_and_paging() -> None:
     ] == [4, 4]
 
 
-def test_ledger_wallet_scope_is_required_and_validated_before_transport() -> None:
+def test_ledger_wallet_scope_is_validated_when_supplied_before_transport() -> None:
     transport = QueueTransport(_response({"ledger": {}, "count": 0}))
     client = _client(transport)
 
@@ -428,6 +428,18 @@ def test_ledger_wallet_scope_is_required_and_validated_before_transport() -> Non
         client.get_ledgers(account_id="not-a-wallet")
 
     assert transport.requests == []
+
+
+def test_ledger_default_wallet_scope_is_explicit_and_omits_query_parameter() -> None:
+    transport = QueueTransport(_response({"ledger": {}, "count": 0}))
+
+    page = _client(transport).get_ledgers(account_id=None)
+
+    assert page.entries == ()
+    assert page.total_count == 0
+    assert urlparse(transport.requests[0].url).query == ""
+    assert transport.requests[0].body is not None
+    assert b"account_id" not in transport.requests[0].body
 
 
 def test_fractional_timestamp_beyond_microseconds_fails_closed() -> None:

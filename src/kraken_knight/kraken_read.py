@@ -1309,18 +1309,22 @@ class KrakenReadClient:
     def get_ledgers(
         self,
         *,
-        account_id: str,
+        account_id: str | None,
         entry_type: str = "all",
         start: int | None = None,
         end: int | None = None,
         offset: int = 0,
     ) -> LedgerPage:
-        normalized_account_id = account_id.strip().upper()
-        account_id_parts = normalized_account_id.split("-")
-        if len(account_id_parts) != 4 or any(
-            len(part) != 4 or not part.isascii() or not part.isalnum() for part in account_id_parts
-        ):
-            raise ValueError("account_id must use Kraken's public wallet-account format")
+        query_params: dict[str, RequestValue] = {}
+        if account_id is not None:
+            normalized_account_id = account_id.strip().upper()
+            account_id_parts = normalized_account_id.split("-")
+            if len(account_id_parts) != 4 or any(
+                len(part) != 4 or not part.isascii() or not part.isalnum()
+                for part in account_id_parts
+            ):
+                raise ValueError("account_id must use Kraken's public wallet-account format")
+            query_params["account_id"] = normalized_account_id
         allowed_types = frozenset(
             {
                 "all",
@@ -1352,7 +1356,7 @@ class KrakenReadClient:
         result, observed_at = self._private_post(
             "Ledgers",
             params,
-            query_params={"account_id": normalized_account_id},
+            query_params=query_params,
         )
         rows = _mapping(result.get("ledger"), field="ledger")
         entries = tuple(_parse_ledger(ledger_id, rows[ledger_id]) for ledger_id in sorted(rows))

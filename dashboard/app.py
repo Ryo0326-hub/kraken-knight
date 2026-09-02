@@ -137,7 +137,12 @@ def _signal_chart(signals: tuple[SignalTelemetry, ...]) -> None:
             "data": {"values": values},
             "mark": {"type": "line", "strokeWidth": 2},
             "encoding": {
-                "x": {"field": "date", "type": "temporal", "title": None},
+                "x": {
+                    "field": "date",
+                    "type": "temporal",
+                    "timeUnit": "utcyearmonthdate",
+                    "title": None,
+                },
                 "y": {
                     "field": "value",
                     "type": "quantitative",
@@ -190,7 +195,12 @@ def _allocation_chart(signals: tuple[SignalTelemetry, ...]) -> None:
                 },
             },
             "encoding": {
-                "x": {"field": "date", "type": "temporal", "title": None},
+                "x": {
+                    "field": "date",
+                    "type": "temporal",
+                    "timeUnit": "utcyearmonthdate",
+                    "title": None,
+                },
                 "y": {
                     "field": "target",
                     "type": "quantitative",
@@ -198,7 +208,12 @@ def _allocation_chart(signals: tuple[SignalTelemetry, ...]) -> None:
                     "scale": {"domain": [0, 100]},
                 },
                 "tooltip": [
-                    {"field": "date", "type": "temporal", "title": "Strategy date"},
+                    {
+                        "field": "date",
+                        "type": "temporal",
+                        "timeUnit": "utcyearmonthdate",
+                        "title": "Strategy date",
+                    },
                     {"field": "target", "type": "quantitative", "format": ".2f"},
                 ],
             },

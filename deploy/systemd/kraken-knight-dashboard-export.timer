@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh sanitized Kraken Knight dashboard telemetry
+
+[Timer]
+OnBootSec=2min
+OnCalendar=*-*-* 00:20:00 UTC
+AccuracySec=1s
+Persistent=yes
+RandomizedDelaySec=0
+Unit=kraken-knight-dashboard-export.service
+
+[Install]
+WantedBy=timers.target

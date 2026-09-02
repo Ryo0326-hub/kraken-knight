@@ -1,0 +1,65 @@
+[Unit]
+Description=Kraken Knight read-only Streamlit dashboard
+Documentation=https://github.com/Ryo0326-hub/kraken-knight/blob/main/docs/DASHBOARD.md
+Wants=kraken-knight-dashboard-export.service
+After=kraken-knight-dashboard-export.service
+ConditionPathIsRegular=/var/lib/kraken-knight-dashboard/telemetry.json
+ConditionPathIsDirectory=/opt/kraken-knight/current
+
+[Service]
+Type=simple
+User=kraken-knight-dashboard
+Group=kraken-knight-dashboard
+WorkingDirectory=/opt/kraken-knight/current
+Environment=XDG_CONFIG_HOME=/run/kraken-knight-dashboard
+Environment=TMPDIR=/run/kraken-knight-dashboard
+Environment=KRAKEN_KNIGHT_DASHBOARD_SNAPSHOT=/var/lib/kraken-knight-dashboard/telemetry.json
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+
+# Localhost plus an authenticated SSH tunnel is the access boundary. There is
+# no public listener, production environment file, database path, or trade API.
+ExecStart=/opt/kraken-knight/current/.venv/bin/streamlit run dashboard/app.py --server.address=127.0.0.1 --server.port=8501 --server.headless=true --server.fileWatcherType=none --server.runOnSave=false --server.enableXsrfProtection=true --server.enableCORS=true --browser.gatherUsageStats=false
+Restart=on-failure
+RestartSec=5s
+
+RuntimeDirectory=kraken-knight-dashboard
+RuntimeDirectoryMode=0700
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+ReadOnlyPaths=/var/lib/kraken-knight-dashboard
+ReadWritePaths=/run/kraken-knight-dashboard
+InaccessiblePaths=/etc/kraken-knight /var/lib/kraken-knight /var/backups/kraken-knight
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SocketBindDeny=any
+SocketBindAllow=ipv4:tcp:8501
+IPAddressDeny=any
+IPAddressAllow=localhost
+TasksMax=128
+MemoryMax=768M
+TimeoutStartSec=60s
+
+[Install]
+WantedBy=multi-user.target

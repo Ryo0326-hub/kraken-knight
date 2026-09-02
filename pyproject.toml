@@ -20,6 +20,9 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
+dashboard = [
+  "streamlit>=1.49,<2",
+]
 dev = [
   "mypy>=1.15",
   "pytest>=8.3",
@@ -29,6 +32,7 @@ dev = [
 
 [project.scripts]
 kraken-knight = "kraken_knight.cli:main"
+kraken-knight-dashboard-export = "kraken_knight.dashboard_snapshot:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kraken_knight"]

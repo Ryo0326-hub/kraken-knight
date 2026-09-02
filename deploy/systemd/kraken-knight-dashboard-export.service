@@ -1,0 +1,50 @@
+[Unit]
+Description=Export sanitized Kraken Knight dashboard telemetry
+Documentation=https://github.com/Ryo0326-hub/kraken-knight/blob/main/docs/DASHBOARD.md
+After=kraken-knight.service
+ConditionPathIsRegular=/var/lib/kraken-knight/kraken-knight.sqlite3
+ConditionPathIsDirectory=/var/lib/kraken-knight-dashboard
+
+[Service]
+Type=oneshot
+User=kraken-knight
+Group=kraken-knight-dashboard
+WorkingDirectory=/opt/kraken-knight/current
+UMask=0027
+
+# This bridge reads the trading ledger through SQLite's read-only/query-only
+# path and publishes only the fixed, secret-free JSON telemetry contract.
+ExecStart=/opt/kraken-knight/current/.venv/bin/kraken-knight-dashboard-export --ledger /var/lib/kraken-knight/kraken-knight.sqlite3 --output /var/lib/kraken-knight-dashboard/telemetry.json
+
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+ReadOnlyPaths=/var/lib/kraken-knight
+ReadWritePaths=/var/lib/kraken-knight-dashboard
+InaccessiblePaths=/etc/kraken-knight /var/backups/kraken-knight
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+TasksMax=32
+MemoryMax=256M
+TimeoutStartSec=60s

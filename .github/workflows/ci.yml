@@ -33,7 +33,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install project and development tools
-        run: uv sync --locked --extra dev --no-editable --reinstall-package kraken-knight
+        run: uv sync --locked --extra dashboard --extra dev --no-editable --reinstall-package kraken-knight
 
       - name: Check formatting
         run: .venv/bin/ruff format --check .
@@ -62,12 +62,19 @@ jobs:
       - name: Verify systemd unit syntax
         run: |
           sudo systemd-sysusers "$GITHUB_WORKSPACE/deploy/systemd/kraken-knight.sysusers.conf"
-          sudo install -d /opt/kraken-knight/current/.venv/bin /etc/kraken-knight
+          sudo systemd-sysusers "$GITHUB_WORKSPACE/deploy/systemd/kraken-knight-dashboard.sysusers.conf"
+          sudo install -d /opt/kraken-knight/current/.venv/bin /etc/kraken-knight /var/lib/kraken-knight
+          sudo systemd-tmpfiles --create "$GITHUB_WORKSPACE/deploy/systemd/kraken-knight-dashboard.tmpfiles.conf"
           sudo ln -sf /usr/bin/true /opt/kraken-knight/current/.venv/bin/kraken-knight
+          sudo ln -sf /usr/bin/true /opt/kraken-knight/current/.venv/bin/kraken-knight-dashboard-export
+          sudo ln -sf /usr/bin/true /opt/kraken-knight/current/.venv/bin/streamlit
           sudo install -m 0640 /dev/null /etc/kraken-knight/config.env
           sudo install -m 0640 /dev/null /etc/kraken-knight/daily.env
           systemd-analyze verify \
             deploy/systemd/kraken-knight.service \
             deploy/systemd/kraken-knight.timer \
             deploy/systemd/kraken-knight-reconcile.service \
-            deploy/systemd/kraken-knight-reconcile.timer
+            deploy/systemd/kraken-knight-reconcile.timer \
+            deploy/systemd/kraken-knight-dashboard-export.service \
+            deploy/systemd/kraken-knight-dashboard-export.timer \
+            deploy/systemd/kraken-knight-dashboard.service

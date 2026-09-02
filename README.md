@@ -107,6 +107,10 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for components and invariants
 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for release and old-bot cutover gates,
 and [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for operator procedures.
 
+The optional [read-only Streamlit dashboard](docs/DASHBOARD.md) displays
+sanitized signal and health telemetry over a localhost-only SSH tunnel. It has
+no Kraken credentials, database access, trade controls, or simulated P&L.
+
 ## Current implementation: V3 shadow and read-only reconciliation
 
 The current implementation records one credential-free V3 shadow decision from

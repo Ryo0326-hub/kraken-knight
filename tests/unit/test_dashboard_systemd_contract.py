@@ -13,6 +13,8 @@ def test_streamlit_is_localhost_only_and_cannot_reach_trading_state() -> None:
     assert "ConditionPathIsRegular=" not in unit
     assert "--server.address=127.0.0.1" in unit
     assert "--server.port=8501" in unit
+    assert "--client.toolbarMode=viewer" in unit
+    assert "--client.showErrorDetails=none" in unit
     assert "KRAKEN_KNIGHT_DASHBOARD_SNAPSHOT=" in unit
     assert (
         "InaccessiblePaths=/etc/kraken-knight /var/lib/kraken-knight "

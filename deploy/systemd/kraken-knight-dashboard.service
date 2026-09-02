@@ -19,7 +19,7 @@ UMask=0077
 
 # Localhost plus an authenticated SSH tunnel is the access boundary. There is
 # no public listener, production environment file, database path, or trade API.
-ExecStart=/opt/kraken-knight/current/.venv/bin/streamlit run dashboard/app.py --server.address=127.0.0.1 --server.port=8501 --server.headless=true --server.fileWatcherType=none --server.runOnSave=false --server.enableXsrfProtection=true --server.enableCORS=true --browser.gatherUsageStats=false
+ExecStart=/opt/kraken-knight/current/.venv/bin/streamlit run dashboard/app.py --server.address=127.0.0.1 --server.port=8501 --server.headless=true --server.fileWatcherType=none --server.runOnSave=false --server.enableXsrfProtection=true --server.enableCORS=true --browser.gatherUsageStats=false --client.toolbarMode=viewer --client.showErrorDetails=none
 Restart=on-failure
 RestartSec=5s
 

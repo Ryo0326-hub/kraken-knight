@@ -45,6 +45,10 @@ st.markdown(
         border-radius: 14px;
         padding: .85rem 1rem;
       }
+      [data-testid="stMetricValue"] {
+        font-size: clamp(1.45rem, 2vw, 2rem);
+        white-space: nowrap;
+      }
       .mode-banner {
         border-radius: 12px;
         font-weight: 750;

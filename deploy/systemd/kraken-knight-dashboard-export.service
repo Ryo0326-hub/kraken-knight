@@ -2,7 +2,7 @@
 Description=Export sanitized Kraken Knight dashboard telemetry
 Documentation=https://github.com/Ryo0326-hub/kraken-knight/blob/main/docs/DASHBOARD.md
 After=kraken-knight.service
-ConditionPathIsRegular=/var/lib/kraken-knight/kraken-knight.sqlite3
+ConditionPathExists=/var/lib/kraken-knight/kraken-knight.sqlite3
 ConditionPathIsDirectory=/var/lib/kraken-knight-dashboard
 
 [Service]

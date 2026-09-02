@@ -3,7 +3,7 @@ Description=Kraken Knight read-only Streamlit dashboard
 Documentation=https://github.com/Ryo0326-hub/kraken-knight/blob/main/docs/DASHBOARD.md
 Wants=kraken-knight-dashboard-export.service
 After=kraken-knight-dashboard-export.service
-ConditionPathIsRegular=/var/lib/kraken-knight-dashboard/telemetry.json
+ConditionFileNotEmpty=/var/lib/kraken-knight-dashboard/telemetry.json
 ConditionPathIsDirectory=/opt/kraken-knight/current
 
 [Service]

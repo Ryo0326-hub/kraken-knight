@@ -9,6 +9,8 @@ SYSTEMD_DIR = REPOSITORY_ROOT / "deploy" / "systemd"
 def test_streamlit_is_localhost_only_and_cannot_reach_trading_state() -> None:
     unit = (SYSTEMD_DIR / "kraken-knight-dashboard.service").read_text(encoding="utf-8")
 
+    assert "ConditionFileNotEmpty=/var/lib/kraken-knight-dashboard/telemetry.json" in unit
+    assert "ConditionPathIsRegular=" not in unit
     assert "--server.address=127.0.0.1" in unit
     assert "--server.port=8501" in unit
     assert "KRAKEN_KNIGHT_DASHBOARD_SNAPSHOT=" in unit
@@ -27,6 +29,8 @@ def test_streamlit_is_localhost_only_and_cannot_reach_trading_state() -> None:
 def test_exporter_is_networkless_read_only_and_writes_only_dashboard_state() -> None:
     unit = (SYSTEMD_DIR / "kraken-knight-dashboard-export.service").read_text(encoding="utf-8")
 
+    assert "ConditionPathExists=/var/lib/kraken-knight/kraken-knight.sqlite3" in unit
+    assert "ConditionPathIsRegular=" not in unit
     assert "PrivateNetwork=yes" in unit
     assert "ReadOnlyPaths=/var/lib/kraken-knight" in unit
     assert "ReadWritePaths=/var/lib/kraken-knight-dashboard" in unit
